@@ -269,26 +269,41 @@ int main(int argc, char* argv[]) {
 	string action = argv[1];
 	string dbpath = argv[2];
 
+	// Create a new sqlite db if file does not exist
+	sqlite3 * sqldb;
+	int ok = sqlite3_open_v2(
+		dbpath.c_str(),
+		&sqldb,
+		SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+		NULL
+	);
+	panic_if(ok != SQLITE_OK, "Could not open sqlite3 database!");
+
 	if (action == "scan") {
 		string musicdir = argv[3];
 
-		// Create a new sqlite db if file does not exist
-		sqlite3 * sqldb;
-		int ok = sqlite3_open_v2(
-			dbpath.c_str(),
-			&sqldb,
-			SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
-			NULL
-		);
-		panic_if(ok != SQLITE_OK, "Could not open sqlite3 database!");
 		sqlite3_exec(sqldb, init_sql, NULL, NULL, NULL);
 
 		// Start scanning and adding stuff to the database
 		scan_fs(sqldb, musicdir);
-
-		// Close and write to disk
-		sqlite3_close(sqldb);
 	}
+	if (action == "useradd") {
+		string user = argv[3];
+		string pass = argv[4];
+
+		sqlite3_stmt *stmt;
+		sqlite3_prepare_v2(sqldb, "INSERT INTO `users` (`username`, `password`) VALUES (?,?);", -1, &stmt, NULL);
+
+		sqlite3_bind_text (stmt, 1, user.c_str(), -1, NULL);
+		sqlite3_bind_text (stmt, 2, pass.c_str(), -1, NULL);
+
+		if (sqlite3_step(stmt) != SQLITE_DONE)
+			cerr << "Error adding user " << sqlite3_errmsg(sqldb) << endl;
+		sqlite3_finalize(stmt);
+	}
+
+	// Close and write to disk
+	sqlite3_close(sqldb);
 
 	return 0;
 }

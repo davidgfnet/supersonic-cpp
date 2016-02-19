@@ -142,6 +142,7 @@ public:
 		sqlite3_bind_text(stmt, 1, user.c_str(), -1, NULL);
 		if (sqlite3_step(stmt) == SQLITE_ROW) {
 			// Query pass and get MD5, compare
+			return true;
 		}
 		sqlite3_finalize(stmt);
 		return false;
@@ -228,7 +229,7 @@ public:
 		sqlite3_stmt *stmt;
 		sqlite3_prepare_v2(sqldb, "SELECT `id`, title, albumid, album, artistid, artist,"
 			"trackn, discn, year, duration, bitRate, genre, type FROM songs "
-			"WHERE `id`=? ORDER BY trackn, discn ASC", -1, &stmt, NULL);
+			"WHERE `albumid`=? ORDER BY trackn, discn ASC", -1, &stmt, NULL);
 
 		sqlite3_bind_text(stmt, 1, id.c_str(), -1, NULL);
 
@@ -279,6 +280,29 @@ private:
 	sqlite3 * sqldb;
 };
 
+static string dehexify(string in) {
+	string out;
+	for (unsigned i = 0; i < in.size()/2; i++) {
+		unsigned char hi = 0, lo = 0;
+		if (in[2*i] >= '0' and in[2*i] <= '9')
+			hi = in[2*i] - '0';
+		else if (in[2*i] >= 'a' and in[2*i] <= 'f')
+			hi = in[2*i] - 'a' + 10;
+		else if (in[2*i] >= 'A' and in[2*i] <= 'F')
+			hi = in[2*i] - 'A' + 10;
+
+		if (in[2*i+1] >= '0' and in[2*i+1] <= '9')
+			lo = in[2*i+1] - '0';
+		else if (in[2*i+1] >= 'a' and in[2*i+1] <= 'f')
+			lo = in[2*i+1] - 'a' + 10;
+		else if (in[2*i+1] >= 'A' and in[2*i+1] <= 'F')
+			lo = in[2*i+1] - 'A' + 10;
+
+		out += (char)((hi << 4) | lo);
+	}
+	return out;
+}
+
 class file_service : public rest_service {
 	class file_generator : public response_generator {
 	public:
@@ -312,7 +336,10 @@ class file_service : public rest_service {
 			return false;
 
 		if (!req.params["p"].empty()) {
-			return model.checkCredentials(user, req.params["p"]);
+			string pass = req.params["p"];
+			if (pass.substr(0, 4) == "enc:")
+				pass = dehexify(pass.substr(4));
+			return model.checkCredentials(user, pass);
 		}
 		if (!req.params["s"].empty() && !req.params["t"].empty()) {
 			return model.checkCredentialsMD5(user, req.params["t"], req.params["s"]);
@@ -340,7 +367,7 @@ class file_service : public rest_service {
 				{"artist",   song.artist },
 				{"track",    to_string(song.trackn) },
 				{"genre",    song.genre },
-				{"duration", to_string(song.duration) },
+				{"duration", to_string(song.duration/1000) },
 				{"year",     to_string(song.year) },
 				{"discNumber", to_string(song.discn) },
 				{"bitRate",  to_string(song.bitRate) },
@@ -472,7 +499,7 @@ class file_service : public rest_service {
 
 			return XML(req,
 				XN("indexes", {
-					{"lastModified", "FIXME"},
+					{"lastModified", "1455843830000"},  // FIXME: Unix timestamp * 1000
 					{"ignoredArticles", "The El La Los Las Le Les"},
 				},
 				ret)
