@@ -13,12 +13,17 @@
 #include <dirent.h>
 #include <stdio.h>
 #include <string>
-#include <locale>
-#include <codecvt>
 
 #include <sqlite3.h>
-#include <openssl/sha.h>
-#include <id3tag.h>
+#include <taglib/fileref.h>
+#include <taglib/tag.h>
+#include <taglib/tpropertymap.h>
+#include <taglib/mpegfile.h>
+#include <taglib/id3v2tag.h>
+#include <taglib/oggfile.h>
+#include <taglib/vorbisfile.h>
+#include <taglib/attachedpictureframe.h>
+#include <taglib/flacpicture.h>
 
 using namespace std;
 
@@ -68,60 +73,56 @@ void panic_if(bool cond, string text) {
 }
 
 uint64_t calcId(string s) {
-	unsigned char md[20];
-	SHA1((unsigned char*)s.c_str(), s.size(), md);
+	// 64 bit FNV-1a
+	uint64_t hash = 14695981039346656037ULL;
+	for (unsigned char c: s) {
+		hash ^= c;
+		hash *= 1099511628211ULL;
+	}
 
-	uint64_t n = 0;
-	for (uint64_t i = 0; i < 8; i++)
-		n = (n << 8) | md[i];
-
-	return n & 0x7FFFFFFFFFFFFFFF;
+	// Sqlite doesn't like unsigned numbers :D
+	return hash & 0x7FFFFFFFFFFFFFFF;
 }
 
-template <typename T>
-string toUTF8(const basic_string<T, char_traits<T>, allocator<T>>& source)
-{
-    string result;
-
-    wstring_convert<codecvt_utf8_utf16<T>, T> convertor;
-    result = convertor.to_bytes(source);
-
-    return result;
-}
-
-string iso88959_to_utf8(string inp)
-{
-    string ret;
-	for (auto c: inp) {
-		if (!(c & 0x80)) {
-			ret += c;
-		}
-		else {
-			ret += (char) (0xc0 | ((unsigned)c) >> 6);
-			ret += (char) (0x80 | (c & 0x3F));
-		}
-    }
-    return ret;
-}
-
-string mp3field(struct id3_tag const * tags, char const * fieldn) {
-	struct id3_frame * f = id3_tag_findframe(tags, fieldn, 0);
-	union id3_field * field;
-
-	if (!f) {
+string base64Decode(const string & input) {
+	if (input.length() % 4)
 		return "";
-	}
 
-	field = id3_frame_field(f, 1);
-	if (field) {
-		id3_ucs4_t const * encstr = id3_field_getstrings(field, 0);
-		id3_utf8_t * content = id3_ucs4_utf8duplicate(encstr);
-		string ret((char*)content);
-		free(content);
-		return ret;
+	//Setup a vector to hold the result
+	string ret;
+	unsigned int temp = 0;
+	for (unsigned cursor = 0; cursor < input.size(); ) {
+		for (unsigned i = 0; i < 4; i++) {
+			unsigned char c = *(unsigned char*)&input[cursor];
+			temp <<= 6;
+			if       (c >= 0x41 && c <= 0x5A)
+				temp |= c - 0x41;
+			else if  (c >= 0x61 && c <= 0x7A)
+				temp |= c - 0x47;
+			else if  (c >= 0x30 && c <= 0x39)
+				temp |= c + 0x04;
+			else if  (c == 0x2B)
+				temp |= 0x3E;
+			else if  (c == 0x2F)
+				temp |= 0x3F;
+			else if  (c == '=') {
+				if (input.size() - cursor == 1) {
+					ret.push_back((temp >> 16) & 0x000000FF);
+					ret.push_back((temp >> 8 ) & 0x000000FF);
+					return ret;
+				}
+				else if (input.size() - cursor == 2) {
+					ret.push_back((temp >> 10) & 0x000000FF);
+					return ret;
+				}
+			}
+			cursor++;
+		}
+		ret.push_back((temp >> 16) & 0x000000FF);
+		ret.push_back((temp >> 8 ) & 0x000000FF);
+		ret.push_back((temp      ) & 0x000000FF);
 	}
-
-	return "";
+	return ret;
 }
 
 void insert_artist(sqlite3 * sqldb, string artist) {
@@ -135,22 +136,23 @@ void insert_artist(sqlite3 * sqldb, string artist) {
 	sqlite3_finalize(stmt);
 }
 
-void insert_album(sqlite3 * sqldb, string album, string artist) {
+void insert_album(sqlite3 * sqldb, string album, string artist, string cover) {
 	sqlite3_stmt *stmt;
 	sqlite3_prepare_v2(sqldb, "INSERT INTO `albums` "
-		"(`id`, `title`, `artistid`, `artist`) VALUES (?,?,?,?);", -1, &stmt, NULL);
+		"(`id`, `title`, `artistid`, `artist`, `cover`) VALUES (?,?,?,?,?);", -1, &stmt, NULL);
 
 	sqlite3_bind_int64(stmt, 1, calcId(album + "@" + artist));
 	sqlite3_bind_text (stmt, 2, album.c_str(), -1, NULL);
 	sqlite3_bind_int64(stmt, 3, calcId(artist));
 	sqlite3_bind_text (stmt, 4, artist.c_str(), -1, NULL);
+	sqlite3_bind_blob (stmt, 5, cover.data(), cover.size(), NULL);
 
 	sqlite3_step(stmt);
 	sqlite3_finalize(stmt);
 }
 
 void insert_song(sqlite3 * sqldb, string filename, string title, string artist, string album,
-	string type, string genre, unsigned tn, unsigned year, unsigned discn, unsigned duration) {
+	string type, string genre, unsigned tn, unsigned year, unsigned discn, unsigned duration, unsigned bitrate) {
 
 	sqlite3_stmt *stmt;
 	sqlite3_prepare_v2(sqldb, "INSERT INTO `songs` "
@@ -169,7 +171,7 @@ void insert_song(sqlite3 * sqldb, string filename, string title, string artist, 
 	sqlite3_bind_int  (stmt,10, year);
 	sqlite3_bind_int  (stmt,11, discn);
 	sqlite3_bind_int  (stmt,12, duration);
-	sqlite3_bind_int  (stmt,13, 0);
+	sqlite3_bind_int  (stmt,13, bitrate);
 	sqlite3_bind_text (stmt,14, filename.c_str(), -1, NULL);
 
 	if (sqlite3_step(stmt) != SQLITE_DONE) {
@@ -178,56 +180,64 @@ void insert_song(sqlite3 * sqldb, string filename, string title, string artist, 
 	}
 
 	sqlite3_finalize(stmt);
-
-	insert_album(sqldb, album, artist);
-	insert_artist(sqldb, artist);
 }
 
 void scan_music_file(sqlite3 * sqldb, string fullpath) {
 	string ext = fullpath.substr(fullpath.size()-3);
 	std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
+	TagLib::FileRef f(fullpath.c_str());
+	if (f.isNull())
+		return;
+
+	TagLib::Tag *tag = f.tag();
+	if (!tag)
+		return;
+
+
+	string cover;
 	if (ext == "mp3") {
-		struct id3_file * mp3file = id3_file_open(fullpath.c_str(), ID3_FILE_MODE_READONLY);
-		if (!mp3file) {
-			cerr << "Couldn't process " << fullpath << endl;
-			return;
+		TagLib::MPEG::File audioFile(fullpath.c_str());
+		TagLib::ID3v2::Tag *mp3_tag = audioFile.ID3v2Tag(true);
+
+		if (mp3_tag) {
+			auto frames = mp3_tag->frameList("APIC");
+			if (!frames.isEmpty()) {
+				auto frame = static_cast<TagLib::ID3v2::AttachedPictureFrame *>(frames.front());
+				cover = string(frame->picture().data(), frame->picture().size());
+				//frame->mimeType()
+			}
 		}
-		struct id3_tag * tags = id3_file_tag(mp3file);
-		
-		string title  = mp3field(tags, ID3_FRAME_TITLE);
-		string artist = mp3field(tags, ID3_FRAME_ARTIST);
-		string album  = mp3field(tags, ID3_FRAME_ALBUM);
-		string track  = mp3field(tags, ID3_FRAME_TRACK);
-		string genre  = mp3field(tags, ID3_FRAME_GENRE);
+	}
+	else if (ext == "ogg") {
+		auto vorbis_tag = dynamic_cast<TagLib::Ogg::XiphComment *>(tag);
+		if (vorbis_tag) {
+			if (vorbis_tag->properties().contains("METADATA_BLOCK_PICTURE")) {
+				auto cdata = vorbis_tag->properties()["METADATA_BLOCK_PICTURE"][0].data(TagLib::String::UTF8);
+				cover = base64Decode(string(cdata.data(), cdata.size()));
+				TagLib::FLAC::Picture picture;
+				picture.parse(TagLib::ByteVector(cover.c_str(), cover.size()));
+				cover = string(picture.data().data(), picture.data().size());
+			}
+		}
+	}
 
-		unsigned tn   = 0;
-
-		try {
-			tn = stoul(track);
-		} catch(...) {}
-
-		int year = -1;
-		try {
-			year = stoul(mp3field(tags, ID3_FRAME_YEAR));
-		} catch (...) {}
+	if (ext == "mp3" or ext == "ogg") {
+		TagLib::AudioProperties *properties = f.audioProperties();
+		if (!properties)
+			return;
 
 		int discn = 0;
-		try {
-			discn = stoul(mp3field(tags, "TPOS"));
-		} catch (...) {}
+		if (tag->properties().contains("DISCNUMBER")) {
+			discn = tag->properties()["DISCNUMBER"][0].toInt();
+		}
 
-		int duration = 0;
-		try {
-			duration = stoul(mp3field(tags, "TLEN"));
-		} catch (...) {}
+		insert_song(sqldb, fullpath, tag->title().toCString(true), tag->artist().toCString(true),
+			tag->album().toCString(true), ext, tag->genre().toCString(true),
+			tag->track(), tag->year(), discn, properties->length(), properties->bitrate());
 
-		insert_song(sqldb, fullpath, title, artist, album, "mp3", genre, tn, year, discn, duration);
-
-		id3_file_close(mp3file);
-	}
-	if (ext == "ogg") {
-		
+		insert_album(sqldb, tag->album().toCString(true), tag->artist().toCString(true), cover);
+		insert_artist(sqldb, tag->artist().toCString(true));
 	}
 }
 

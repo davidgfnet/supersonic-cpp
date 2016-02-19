@@ -142,7 +142,7 @@ public:
 		sqlite3_bind_text(stmt, 1, user.c_str(), -1, NULL);
 		if (sqlite3_step(stmt) == SQLITE_ROW) {
 			// Query pass and get MD5, compare
-			return true;
+			return false;
 		}
 		sqlite3_finalize(stmt);
 		return false;
