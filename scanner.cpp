@@ -127,7 +127,7 @@ string base64Decode(const string & input) {
 
 void insert_artist(sqlite3 * sqldb, string artist) {
 	sqlite3_stmt *stmt;
-	sqlite3_prepare_v2(sqldb, "INSERT INTO `artists` (`id`, `name`) VALUES (?,?);", -1, &stmt, NULL);
+	sqlite3_prepare_v2(sqldb, "INSERT OR REPLACE INTO `artists` (`id`, `name`) VALUES (?,?);", -1, &stmt, NULL);
 
 	sqlite3_bind_int64(stmt, 1, calcId(artist));
 	sqlite3_bind_text (stmt, 2, artist.c_str(), -1, NULL);
@@ -138,7 +138,7 @@ void insert_artist(sqlite3 * sqldb, string artist) {
 
 void insert_album(sqlite3 * sqldb, string album, string artist, string cover) {
 	sqlite3_stmt *stmt;
-	sqlite3_prepare_v2(sqldb, "INSERT INTO `albums` "
+	sqlite3_prepare_v2(sqldb, "INSERT OR REPLACE INTO `albums` "
 		"(`id`, `title`, `artistid`, `artist`, `cover`) VALUES (?,?,?,?,?);", -1, &stmt, NULL);
 
 	sqlite3_bind_int64(stmt, 1, calcId(album + "@" + artist));
@@ -155,7 +155,7 @@ void insert_song(sqlite3 * sqldb, string filename, string title, string artist, 
 	string type, string genre, unsigned tn, unsigned year, unsigned discn, unsigned duration, unsigned bitrate) {
 
 	sqlite3_stmt *stmt;
-	sqlite3_prepare_v2(sqldb, "INSERT INTO `songs` "
+	sqlite3_prepare_v2(sqldb, "INSERT OR REPLACE INTO `songs` "
 		"(`id`, `title`, `albumid`, `album`, `artistid`, `artist`, `type`, `genre`, `trackn`, `year`, `discn`, `duration`, `bitRate`, `filename`)"
 		" VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?);", -1, &stmt, NULL);
 
