@@ -154,7 +154,8 @@ public:
 		sqlite3_prepare_v2(sqldb, "SELECT cover FROM albums WHERE id=?", -1, &stmt, NULL);
 		sqlite3_bind_text(stmt, 1, id.c_str(), -1, NULL);
 		if (sqlite3_step(stmt) == SQLITE_ROW) {
-			ret = (char*)sqlite3_column_text (stmt, 0);
+			auto length = sqlite3_column_bytes(stmt, 0);
+			ret = string((char*)sqlite3_column_blob(stmt, 0), length);
 		}
 		sqlite3_finalize(stmt);
 		return ret;
@@ -175,7 +176,7 @@ public:
 
 	vector<Album> getAllAlbumsSorted(unsigned offset, unsigned size) {
 		sqlite3_stmt *stmt;
-		sqlite3_prepare_v2(sqldb, "SELECT `id`, title, artistid, artist, cover FROM albums LIMIT ? OFFSET ? ORDER BY `title` ASC", -1, &stmt, NULL);
+		sqlite3_prepare_v2(sqldb, "SELECT `id`, title, artistid, artist, cover FROM albums ORDER BY `title` COLLATE NOCASE ASC LIMIT ? OFFSET ?", -1, &stmt, NULL);
 		sqlite3_bind_int64(stmt, 1, size);
 		sqlite3_bind_int64(stmt, 2, offset);
 
@@ -189,7 +190,7 @@ public:
 
 	vector<Album> getAlbumsByArtist(string artistid) {
 		sqlite3_stmt *stmt;
-		sqlite3_prepare_v2(sqldb, "SELECT `id`, title, artistid, artist, cover FROM albums WHERE artistid=? ORDER BY `title` ASC", -1, &stmt, NULL);
+		sqlite3_prepare_v2(sqldb, "SELECT `id`, title, artistid, artist, cover FROM albums WHERE artistid=? ORDER BY `title` COLLATE NOCASE ASC", -1, &stmt, NULL);
 		sqlite3_bind_text(stmt, 1, artistid.c_str(), -1, NULL);
 
 		vector<Album> albums;
@@ -215,7 +216,7 @@ public:
 
 	vector<Artist> getArtists() {
 		sqlite3_stmt *stmt;
-		sqlite3_prepare_v2(sqldb, "SELECT `id`, `name` FROM artists ORDER BY `name` ASC", -1, &stmt, NULL);
+		sqlite3_prepare_v2(sqldb, "SELECT `id`, `name` FROM artists ORDER BY `name` COLLATE NOCASE ASC", -1, &stmt, NULL);
 
 		vector<Artist> artists;
 		while (sqlite3_step(stmt) == SQLITE_ROW)
@@ -311,8 +312,8 @@ class file_service : public rest_service {
 
 		virtual bool generate() override {
 			size_t data_size = data.size();
-			data.resize(data_size + 1024);
-			size_t read = fread(data.data() + data_size, 1, 1024, f);
+			data.resize(data_size + 128*1024);
+			size_t read = fread(data.data() + data_size, 1, 128*1024, f);
 			data.resize(data_size + read);
 
 			return read;
@@ -367,7 +368,7 @@ class file_service : public rest_service {
 				{"artist",   song.artist },
 				{"track",    to_string(song.trackn) },
 				{"genre",    song.genre },
-				{"duration", to_string(song.duration/1000) },
+				{"duration", to_string(song.duration) },
 				{"year",     to_string(song.year) },
 				{"discNumber", to_string(song.discn) },
 				{"bitRate",  to_string(song.bitRate) },
@@ -423,6 +424,8 @@ class file_service : public rest_service {
 			unsigned offset = 0, size = 50;
 			try {
 				offset = stoul(req.params["offset"]);
+			} catch (...) {}
+			try {
 				size   = stoul(req.params["size"]);
 			} catch (...) {}
 
@@ -435,7 +438,7 @@ class file_service : public rest_service {
 					{"artist",   album.artist},
 					{"parent",   album.artistid},
 					{"isDir",   "true"},
-					{"coverArt", album.cover}
+					{"coverArt", album.id}
 				});
 			}
 
@@ -451,7 +454,7 @@ class file_service : public rest_service {
 					{"id",        req.params["id"]},
 					{"name",      get<1>(songs)},
 					{"songCount", to_string(get<2>(songs))},
-					{"coverArt",  "FIXME"},
+					{"coverArt",  req.params["id"]},
 				},
 				get<0>(songs))
 			);
@@ -481,7 +484,7 @@ class file_service : public rest_service {
 					{"suffix",   song.type },
 					{"contentType", mimetypes[song.type] },
 					{"isDir",   "false" },
-					//{"coverArt", (alb.cover.size() ? album_id : "") }
+					{"coverArt", song.albumid }
 				});
 			}
 
