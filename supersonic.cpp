@@ -449,7 +449,7 @@ class file_service : public rest_service {
 		}
 
 		else if (req.url == "/rest/getAlbum.view") {
-			auto songs = listSongs("child", req.params["id"]);
+			auto songs = listSongs("song", req.params["id"]);
 			return XML(req,
 				XN("album", {
 					{"id",        req.params["id"]},
