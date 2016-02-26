@@ -442,8 +442,9 @@ class file_service : public rest_service {
 				});
 			}
 
+			string tag = (req.url == "/rest/getAlbumList2.view") ? "albumList2" : "albumList";
 			return XML(req,
-				XN("albumList", ret)
+				XN(tag, ret)
 			);
 		}
 
