@@ -1,4 +1,6 @@
 
+#define _FILE_OFFSET_BITS 64
+
 #include <cstdlib>
 #include <string>
 #include <iostream>
@@ -304,18 +306,36 @@ static string dehexify(string in) {
 	return out;
 }
 
+static uint64_t fsize(FILE *fd) {
+	fseeko(fd, 0, SEEK_END);
+	uint64_t r = ftello(fd);
+	fseeko(fd, 0, SEEK_SET);
+	return r;
+}
+
 class file_service : public rest_service {
 	class file_generator : public response_generator {
 	public:
-		file_generator(FILE* f) : f(f) {}
+		file_generator(FILE* f, uint64_t offset = 0, uint64_t size = ~0)
+		  : f(f), ret_size(size) {
+
+			// Seek to offset
+			fseeko(f, offset, SEEK_SET);
+		}
 		~file_generator() { if (f) fclose(f); }
 
 		virtual bool generate() override {
+			const size_t blocksize = 128*1024;
+			size_t toread = std::min(ret_size, blocksize);
+			if (!toread)
+				return 0;
+
 			size_t data_size = data.size();
-			data.resize(data_size + 128*1024);
-			size_t read = fread(data.data() + data_size, 1, 128*1024, f);
+			data.resize(data_size + toread);
+			size_t read = fread(data.data() + data_size, 1, toread, f);
 			data.resize(data_size + read);
 
+			ret_size -= read;
 			return read;
 		}
 		virtual string_piece current() const override {
@@ -328,6 +348,7 @@ class file_service : public rest_service {
 
 	private:
 		FILE* f;
+		uint64_t ret_size;
 		vector<char> data;
 	};
 
@@ -382,6 +403,28 @@ class file_service : public rest_service {
 	}
 
 	public:
+	virtual bool handle_partial(rest_request& req) override {
+		if (req.method != "HEAD" && req.method != "GET" && req.method != "POST") return req.respond_method_not_allowed("HEAD, GET, POST");
+
+		// Check for auth user and kick out intruders
+		if (!checkCredentials(req))
+			return authErr(req);
+
+		if (req.url == "/rest/stream.view") {
+			// Lookup song_id and get a file name!
+			string song_id = req.params["id"];
+			FILE * fd = model.getSongFile(song_id);
+            uint64_t max_filesize = fsize(fd) - req.offset;
+            if (req.max_size > max_filesize) req.max_size = max_filesize;
+
+			std::string partdesc = std::to_string(req.offset) + "-" + std::to_string(req.offset + req.max_size - 1) + "/*";
+			if (fd)
+				return req.respond_partial("application/octet-stream", new file_generator(fd, req.offset, req.max_size), partdesc);
+		}
+
+        return false; // Fallback to non-partial request
+    }
+
 	virtual bool handle(rest_request& req) override {
 		if (req.method != "HEAD" && req.method != "GET" && req.method != "POST") return req.respond_method_not_allowed("HEAD, GET, POST");
 
@@ -589,13 +632,15 @@ int main(int argc, char* argv[]) {
 	int connection_limit = argc >= 5 ? stoi(argv[4]) : 2;
 
 	rest_server server;
+    rest_server::set_x509_cert("server.cert", "server.key");
+
 	server.set_log_file(stderr);
 	server.set_max_connections(connection_limit);
 	server.set_threads(threads);
 
 	cerr << "Loading sqlite database " << database << " ..." << endl;
 	file_service service(database);
-	if (!server.start(&service, port)) {
+	if (!server.start(&service, port, false)) {
 		fprintf(stderr, "Cannot start REST server!\n");
 		return 1;
 	}
