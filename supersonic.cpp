@@ -25,6 +25,16 @@ void panic_if(bool cond, string text) {
 	}
 }
 
+string xmlescape(string content) {
+	string escaped;
+	for (auto c: content)
+		if (c == '"')
+			escaped += "&quot;";
+		else
+			escaped += c;
+	return escaped;
+}
+
 string XN(string tag, string content) {
 	return "<" + tag + ">\n" + content + "</" + tag + ">\n";
 }
@@ -33,7 +43,7 @@ string XN(string tag, map<string, string> attrs, string content = "") {
 	string att;
 	for (auto it: attrs)
 		if (it.second.size())
-			att += it.first + "=\"" + it.second + "\" ";
+			att += xmlescape(it.first) + "=\"" + xmlescape(it.second) + "\" ";
 	att = "<" + tag + " " + att;
 	if (content.size())
 		return att + ">\n" + content + "</" + tag + ">\n";
@@ -326,7 +336,7 @@ class file_service : public rest_service {
 
 		virtual bool generate() override {
 			const size_t blocksize = 128*1024;
-			size_t toread = std::min(ret_size, blocksize);
+			size_t toread = ret_size < blocksize ? ret_size : blocksize;
 			if (!toread)
 				return 0;
 
@@ -640,7 +650,7 @@ int main(int argc, char* argv[]) {
 
 	cerr << "Loading sqlite database " << database << " ..." << endl;
 	file_service service(database);
-	if (!server.start(&service, port, false)) {
+	if (!server.start(&service, port, true)) {
 		fprintf(stderr, "Cannot start REST server!\n");
 		return 1;
 	}
