@@ -301,6 +301,8 @@ int main(int argc, char* argv[]) {
 		string user = argv[3];
 		string pass = argv[4];
 
+		sqlite3_exec(sqldb, init_sql, NULL, NULL, NULL);
+
 		sqlite3_stmt *stmt;
 		sqlite3_prepare_v2(sqldb, "INSERT INTO `users` (`username`, `password`) VALUES (?,?);", -1, &stmt, NULL);
 

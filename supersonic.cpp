@@ -188,7 +188,7 @@ public:
 
 	vector<Album> getAllAlbumsSorted(unsigned offset, unsigned size) {
 		sqlite3_stmt *stmt;
-		sqlite3_prepare_v2(sqldb, "SELECT `id`, title, artistid, artist, cover FROM albums ORDER BY `title` COLLATE NOCASE ASC LIMIT ? OFFSET ?", -1, &stmt, NULL);
+		sqlite3_prepare_v2(sqldb, "SELECT `id`, title, artistid, artist, NULL FROM albums ORDER BY `title` COLLATE NOCASE ASC LIMIT ? OFFSET ?", -1, &stmt, NULL);
 		sqlite3_bind_int64(stmt, 1, size);
 		sqlite3_bind_int64(stmt, 2, offset);
 
