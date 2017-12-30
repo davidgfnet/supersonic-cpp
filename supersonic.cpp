@@ -25,10 +25,11 @@ void panic_if(bool cond, string text) {
 	}
 }
 
-string quotescape(string content) {
+string cescape(string content, bool isxml = false) {
 	string escaped;
 	for (auto c: content)
 		if (c == '"') escaped += "&quot;";
+		else if (isxml && c == '&') escaped += "&amp;";
 		else escaped += c;
 	return escaped;
 }
@@ -57,10 +58,10 @@ public:
 		if (isjson) {
 			string c;
 			for (const auto it: attrs)
-				c += "\"" + it.first + "\": \"" + quotescape(it.second) + "\",\n";
+				c += "\"" + it.first + "\": \"" + cescape(it.second) + "\",\n";
 			for (const auto it: content) {
 				if (vrep) {
-					c += "\"" + quotescape(it.first) + "\": [\n";
+					c += "\"" + cescape(it.first) + "\": [\n";
 					for (const auto e: it.second)
 						c += e.content_string() + ",\n";
 					c = c.substr(0, c.size()-2);
@@ -75,7 +76,7 @@ public:
 		}else{
 			string a, c;
 			for (const auto it: attrs)
-				a += " " + it.first + "=\"" + quotescape(it.second) + "\"";
+				a += " " + it.first + "=\"" + cescape(it.second, true) + "\"";
 			for (const auto it: content)
 				for (const auto e: it.second)
 					c += e.to_string();
@@ -675,7 +676,7 @@ int main(int argc, char* argv[]) {
 
 	cerr << "Loading sqlite database " << database << " ..." << endl;
 	file_service service(database);
-	if (!server.start(&service, port, false)) {
+	if (!server.start(&service, port, true)) {
 		fprintf(stderr, "Cannot start REST server!\n");
 		return 1;
 	}
