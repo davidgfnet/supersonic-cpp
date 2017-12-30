@@ -25,56 +25,95 @@ void panic_if(bool cond, string text) {
 	}
 }
 
-string xmlescape(string content) {
+string quotescape(string content) {
 	string escaped;
 	for (auto c: content)
-		if (c == '"')
-			escaped += "&quot;";
-		else
-			escaped += c;
+		if (c == '"') escaped += "&quot;";
+		else escaped += c;
 	return escaped;
 }
 
-string XN(string tag, string content) {
-	return "<" + tag + ">\n" + content + "</" + tag + ">\n";
-}
+class Entity {
+public:
+	Entity(bool isjson, string name, map<string, string> attrs, vector<Entity> cvec = {})
+	 : isjson(isjson), vrep(true), name(name), attrs(attrs) {
+		for (auto c: cvec)
+			content[c.name].push_back(c);
+	}
 
-string XN(string tag, map<string, string> attrs, string content = "") {
-	string att;
-	for (auto it: attrs)
-		if (it.second.size())
-			att += xmlescape(it.first) + "=\"" + xmlescape(it.second) + "\" ";
-	att = "<" + tag + " " + att;
-	if (content.size())
-		return att + ">\n" + content + "</" + tag + ">\n";
-	else
-		return att + " />\n";
-}
+	Entity(bool isjson, string name, map<string, string> attrs, Entity e)
+	 : isjson(isjson), vrep(false), name(name), attrs(attrs) {
+		content[e.name].push_back(e);
+	}
 
-bool XML(cxxhttpsrv::rest_request& req, string content) {
-	string escaped;
-	for (auto c: content)
-		if (c == '&')
-			escaped += "&amp;";
+	string to_string() const {
+		if (isjson)
+			return "\"" + name + "\": " + this->content_string();
 		else
-			escaped += c;
+			return this->content_string();
+	}
 
-	return req.respond("text/xml", "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-		"<subsonic-response status=\"ok\" version=\"1.4.0\">\n" + escaped + "\n</subsonic-response>");
-}
+	string content_string() const {
+		if (isjson) {
+			string c;
+			for (const auto it: attrs)
+				c += "\"" + it.first + "\": \"" + quotescape(it.second) + "\",\n";
+			for (const auto it: content) {
+				if (vrep) {
+					c += "\"" + quotescape(it.first) + "\": [\n";
+					for (const auto e: it.second)
+						c += e.content_string() + ",\n";
+					c = c.substr(0, c.size()-2);
+					c += "],\n";
+				} else {
+					c += it.second[0].to_string() + "\n";
+				}
+			}
+			if (attrs.size() || content.size())
+				c = c.substr(0, c.size()-2);
+			return "{\n" + c + "}\n";
+		}else{
+			string a, c;
+			for (const auto it: attrs)
+				a += " " + it.first + "=\"" + quotescape(it.second) + "\"";
+			for (const auto it: content)
+				for (const auto e: it.second)
+					c += e.to_string();
+			return "<" + name + a + ">\n" + c + "</" + name + ">\n";
+		}
+	}
+	bool respond(cxxhttpsrv::rest_request& req) {
+		if (isjson)
+			return req.respond("application/json", "{" + this->to_string() + "}");
+		else
+			return req.respond("text/xml", "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
+			                   this->to_string());
+	}
+	static Entity wrap(Entity e) {
+		return Entity(e.isjson, "subsonic-response",
+		              {{"status", "ok"}, {"version", "1.9.0"}}, e);
+	}
+	static Entity wrap(bool isjson) {
+		return Entity(isjson, "subsonic-response",
+		              {{"status", "ok"}, {"version", "1.9.0"}});
+	}
+	static Entity error(bool isjson, unsigned code, string content) {
+		return Entity(isjson, "subsonic-response",
+		              {{"status", "failed"}, {"version", "1.9.0"}},
+		              Entity(isjson, "error", {{"code", std::to_string(code)}, {"message", content}}));
+	}
 
-bool XMLERR(cxxhttpsrv::rest_request &req, unsigned code, string content) {
-	return req.respond("text/xml", "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-		"<subsonic-response status=\"failed\" version=\"1.4.0\">\n"
-		"<error code=\"" + to_string(code) + "\" message=\"" + content + "\"/>"
-		"\n</subsonic-response>");
-}
+	bool isjson, vrep;
+	string name;
+	map<string, string> attrs;
+	map<string, vector<Entity>> content;
+};
 
 class Artist {
 public:
 	Artist(sqlite3_stmt * stmt) {
-		id       = std::string((char*)sqlite3_column_text (stmt, 0));
-		name     = std::string((char*)sqlite3_column_text (stmt, 1));
+		id       = string((char*)sqlite3_column_text (stmt, 0));
+		name     = string((char*)sqlite3_column_text (stmt, 1));
 	}
 	string id, name;
 };
@@ -83,11 +122,11 @@ class Album {
 public:
 	Album() {}
 	Album(sqlite3_stmt * stmt) {
-		id       = std::string((char*)sqlite3_column_text (stmt, 0));
-		title    = std::string((char*)sqlite3_column_text (stmt, 1));
-		artistid = std::string((char*)sqlite3_column_text (stmt, 2));
-		artist   = std::string((char*)sqlite3_column_text (stmt, 3));
-		cover    = std::string((char*)sqlite3_column_blob (stmt, 4), sqlite3_column_bytes(stmt, 4));
+		id       = string((char*)sqlite3_column_text (stmt, 0));
+		title    = string((char*)sqlite3_column_text (stmt, 1));
+		artistid = string((char*)sqlite3_column_text (stmt, 2));
+		artist   = string((char*)sqlite3_column_text (stmt, 3));
+		cover    = string((char*)sqlite3_column_blob (stmt, 4), sqlite3_column_bytes(stmt, 4));
 	}
 	string id, title, artistid, artist, cover;
 };
@@ -99,12 +138,12 @@ public:
 	string genre, type;
 
 	Song(sqlite3_stmt * stmt) {
-		id       = std::string((char*)sqlite3_column_text (stmt, 0));
-		title    = std::string((char*)sqlite3_column_text (stmt, 1));
-		albumid  = std::string((char*)sqlite3_column_text (stmt, 2));
-		album    = std::string((char*)sqlite3_column_text (stmt, 3));
-		artistid = std::string((char*)sqlite3_column_text (stmt, 4));
-		artist   = std::string((char*)sqlite3_column_text (stmt, 5));
+		id       = string((char*)sqlite3_column_text (stmt, 0));
+		title    = string((char*)sqlite3_column_text (stmt, 1));
+		albumid  = string((char*)sqlite3_column_text (stmt, 2));
+		album    = string((char*)sqlite3_column_text (stmt, 3));
+		artistid = string((char*)sqlite3_column_text (stmt, 4));
+		artist   = string((char*)sqlite3_column_text (stmt, 5));
 
 		trackn   = sqlite3_column_int(stmt, 6);
 		discn    = sqlite3_column_int(stmt, 7);
@@ -112,8 +151,8 @@ public:
 		duration = sqlite3_column_int(stmt, 9);
 		bitRate  = sqlite3_column_int(stmt,10);
 
-		genre    = std::string((char*)sqlite3_column_text (stmt,11));
-		type     = std::string((char*)sqlite3_column_text (stmt,12));
+		genre    = string((char*)sqlite3_column_text (stmt,11));
+		type     = string((char*)sqlite3_column_text (stmt,12));
 	}
 };
 
@@ -380,18 +419,21 @@ class file_service : public rest_service {
 	}
 
 	bool authErr(rest_request & req) {
-		return XMLERR(req, 40, "Wrong username or password");
+		bool rjson = (req.params["f"] == "json");
+		return Entity::error(rjson, 40, "Wrong username or password").respond(req);
 	}
 
 	DataModel model;
 
-	// Returns XML, album Name and song count
-	tuple<string, string, unsigned> listSongs(string node, string album_id) {
-		string ret;
+	// Returns Entities, album Name and song count
+	tuple<vector<Entity>, string, unsigned> listSongs(bool rjson,
+		string node, string album_id) {
+
 		Album alb = model.getAlbum(album_id);
 		auto songs = model.getSongsByAlbum(album_id);
+		vector<Entity> esongs;
 		for (auto song: songs) {
-			ret += XN(node, {
+			esongs.push_back(Entity(rjson, node, {
 				{"id",       song.id },
 				{"title",    song.title },
 				{"parent",   song.albumid },
@@ -407,9 +449,9 @@ class file_service : public rest_service {
 				{"contentType", mimetypes[song.type] },
 				{"isDir",   "false" },
 				{"coverArt", (alb.cover.size() ? album_id : "") }
-			});
+			}));
 		}
-		return tuple<string, string, unsigned>(ret, alb.title, songs.size());
+		return tuple<vector<Entity>, string, unsigned>(esongs, alb.title, songs.size());
 	}
 
 	public:
@@ -427,7 +469,7 @@ class file_service : public rest_service {
             uint64_t max_filesize = fsize(fd) - req.offset;
             if (req.max_size > max_filesize) req.max_size = max_filesize;
 
-			std::string partdesc = std::to_string(req.offset) + "-" + std::to_string(req.offset + req.max_size - 1) + "/*";
+			string partdesc = to_string(req.offset) + "-" + to_string(req.offset + req.max_size - 1) + "/*";
 			if (fd)
 				return req.respond_partial("application/octet-stream", new file_generator(fd, req.offset, req.max_size), partdesc);
 		}
@@ -442,36 +484,37 @@ class file_service : public rest_service {
 		if (!checkCredentials(req))
 			return authErr(req);
 
+		bool rjson = (req.params["f"] == "json");
+
 		if (req.url == "/rest/getMusicDirectory.view") {
-			string ret, tname;
+			vector<Entity> entities;
+			string tname;
 			switch (model.classifyId(req.params["id"])) {
 			case TYPE_ALBUM: {
-				auto songs = listSongs("child", req.params["id"]);
-				ret = get<0>(songs);
+				auto songs = listSongs(rjson, "child", req.params["id"]);
+				entities = get<0>(songs);
 				tname = get<1>(songs);
 				} break;
 			case TYPE_ARTIST: {
 				auto albums = model.getAlbumsByArtist(req.params["id"]);
 				for (auto album: albums) {
-					ret += XN("child", {
+					entities.push_back(Entity(rjson, "child", {
 						{"id",       album.id },
 						{"title",    album.title },
 						{"artist",   album.artist },
 						{"parent",   album.artistid },
 						{"isDir",   "true" },
 						{"coverArt", (album.cover.size() ? album.id : "") }
-					});
+					}));
 					tname = album.artist;
 				}
 				} break;
 			};
 
-			return XML(req, 
-				XN("directory", {
-					{"id",   req.params["id"]},
-					{"name", tname},
-				}, ret)
-			);
+			return Entity::wrap(Entity(rjson, "directory", {
+			                    {"id", req.params["id"]},
+			                    {"name", tname}},
+			                    entities)).respond(req);
 		}
 		else if (req.url == "/rest/getAlbumList.view" or req.url == "/rest/getAlbumList2.view") {
 			unsigned offset = 0, size = 50;
@@ -482,36 +525,31 @@ class file_service : public rest_service {
 				size   = stoul(req.params["size"]);
 			} catch (...) {}
 
-			string ret;
+			vector<Entity> ealbums;
 			auto albums = model.getAllAlbumsSorted(offset, size);
 			for (auto album: albums) {
-				ret += XN("album", {
+				ealbums.push_back(Entity(rjson, "album", {
 					{"id",       album.id},
 					{"title",    album.title},
 					{"artist",   album.artist},
 					{"parent",   album.artistid},
 					{"isDir",   "true"},
 					{"coverArt", album.id}
-				});
+				}));
 			}
 
 			string tag = (req.url == "/rest/getAlbumList2.view") ? "albumList2" : "albumList";
-			return XML(req,
-				XN(tag, ret)
-			);
+			return Entity::wrap(Entity(rjson, tag, {}, ealbums)).respond(req);
 		}
 
 		else if (req.url == "/rest/getAlbum.view") {
-			auto songs = listSongs("song", req.params["id"]);
-			return XML(req,
-				XN("album", {
-					{"id",        req.params["id"]},
-					{"name",      get<1>(songs)},
-					{"songCount", to_string(get<2>(songs))},
-					{"coverArt",  req.params["id"]},
-				},
-				get<0>(songs))
-			);
+			auto songs = listSongs(rjson, "song", req.params["id"]);
+			return Entity::wrap(Entity(rjson, "album", {
+			                    {"id",        req.params["id"]},
+			                    {"name",      get<1>(songs)},
+			                    {"songCount", to_string(get<2>(songs))},
+			                    {"coverArt",  req.params["id"]}},
+			                    get<0>(songs))).respond(req);
 		}
 
 		else if (req.url == "/rest/getRandomSongs.view") {
@@ -520,10 +558,10 @@ class file_service : public rest_service {
 				size = stoul(req.params["size"]);
 			} catch (...) {}
 
-			string ret;
 			auto songs = model.getRandomSongs(size);
+			vector<Entity> esongs;
 			for (auto song: songs) {
-				ret += XN("song", {
+				esongs.push_back(Entity(rjson, "song", {
 					{"id",       song.id },
 					{"title",    song.title },
 					{"parent",   song.albumid },
@@ -538,29 +576,24 @@ class file_service : public rest_service {
 					{"suffix",   song.type },
 					{"contentType", mimetypes[song.type] },
 					{"isDir",   "false" },
-					{"coverArt", song.albumid }
-				});
+					{"coverArt", song.albumid },
+				}));
 			}
 
-			return XML(req,
-				XN("randomSongs", ret)
-			);
+			return Entity::wrap(Entity(rjson, "randomSongs", {}, esongs)).respond(req);
 		}
 
 		else if (req.url == "/rest/getIndexes.view") {
-			auto artists = model.getArtists();
+			vector<Entity> eartists;
+			for (auto artist: model.getArtists())
+				eartists.push_back(Entity(rjson, "artist", 
+					{ {"id", artist.id}, {"name", artist.name} }));
 
-			string ret;
-			for (auto artist: artists)
-				ret += XN("artist", { {"id", artist.id}, {"name", artist.name} });
-
-			return XML(req,
-				XN("indexes", {
-					{"lastModified", "1455843830000"},  // FIXME: Unix timestamp * 1000
-					{"ignoredArticles", "The El La Los Las Le Les"},
-				},
-				ret)
-			);
+			return Entity::wrap(Entity(rjson, "indexes", {
+			                    {"lastModified", "1455843830000"},  // FIXME: Unix timestamp * 1000
+			                    {"ignoredArticles", "The El La Los Las Le Les"}},
+			                    vector<Entity>{
+			                    Entity(rjson, "index", {{"name", "Music"}}, eartists)})).respond(req);
 		}
 
 		else if (req.url == "/rest/getCoverArt.view") {
@@ -576,46 +609,38 @@ class file_service : public rest_service {
 
 		// Misc stuff, needs to be there just to make clients happy :)
 		else if (req.url == "/rest/getMusicFolders.view") {
-			return XML(req,
-				XN("musicFolders",
-					XN("musicFolder", {
-						{"id", "1"},
-						{"name", "Music"}
-					})
-				)
-			);
+			return Entity::wrap(Entity(rjson, "musicFolders", {}, vector<Entity>{
+			                    Entity(rjson, "musicFolder", {
+			                            {"id", "1"},
+			                            {"name", "Music"},
+			                    })})).respond(req);
 		}
 		else if (req.url == "/rest/getLicense.view") {
-			return XML(req,
-				XN("license", {
-					{"valid", "true"},
-					{"email", "example@example.com"},
-					{"key",   "ABC123DEF"},
-				})
-			);
+			return Entity::wrap(Entity(rjson, "license", {
+			                    {"valid", "true"},
+			                    {"email", "example@example.com"},
+			                    {"key",   "ABC123DEF"}})).respond(req);
 		}
 		else if (req.url == "/rest/ping.view") {
-			return XML(req, "");
+			return Entity::wrap(rjson).respond(req);
 		}
 		else if (req.url == "/rest/getUser.view") {
-			return XML(req,
-				XN("user", {
-					{"username",     "admin"},
-					{"email",        "admin@example.com"},
-					{"scrobblingEnabled", "true"},
-					{"adminRole",    "true"},
-					{"settingsRole", "true"},
-					{"downloadRole", "true"},
-					{"uploadRole",   "false"},
-					{"playlistRole", "true"},
-					{"coverArtRole", "true"},
-					{"commentRole",  "false"},
-					{"podcastRole",  "false"},
-					{"streamRole",   "false"},
-					{"jukeboxRole",  "false"},
-					{"shareRole",    "false"},
-				})
-			);
+			return Entity::wrap(Entity(rjson, "user", {
+			                    {"username",     "admin"},
+			                    {"email",        "admin@example.com"},
+			                    {"scrobblingEnabled", "true"},
+			                    {"adminRole",    "true"},
+			                    {"settingsRole", "true"},
+			                    {"downloadRole", "true"},
+			                    {"uploadRole",   "false"},
+			                    {"playlistRole", "true"},
+			                    {"coverArtRole", "true"},
+			                    {"commentRole",  "false"},
+			                    {"podcastRole",  "false"},
+			                    {"streamRole",   "false"},
+			                    {"jukeboxRole",  "false"},
+			                    {"shareRole",    "false"},
+			                    })).respond(req);
 		}
 
 		return req.respond_not_found();
@@ -642,7 +667,7 @@ int main(int argc, char* argv[]) {
 	int connection_limit = argc >= 5 ? stoi(argv[4]) : 2;
 
 	rest_server server;
-    rest_server::set_x509_cert("server.cert", "server.key");
+	rest_server::set_x509_cert("server.cert", "server.key");
 
 	server.set_log_file(stderr);
 	server.set_max_connections(connection_limit);
@@ -650,7 +675,7 @@ int main(int argc, char* argv[]) {
 
 	cerr << "Loading sqlite database " << database << " ..." << endl;
 	file_service service(database);
-	if (!server.start(&service, port, true)) {
+	if (!server.start(&service, port, false)) {
 		fprintf(stderr, "Cannot start REST server!\n");
 		return 1;
 	}
