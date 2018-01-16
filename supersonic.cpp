@@ -127,9 +127,10 @@ public:
 		title    = string((char*)sqlite3_column_text (stmt, 1));
 		artistid = string((char*)sqlite3_column_text (stmt, 2));
 		artist   = string((char*)sqlite3_column_text (stmt, 3));
-		cover    = string((char*)sqlite3_column_blob (stmt, 4), sqlite3_column_bytes(stmt, 4));
+		hascover = sqlite3_column_int(stmt, 4);
 	}
-	string id, title, artistid, artist, cover;
+	string id, title, artistid, artist;
+	int hascover;
 };
 
 class Song {
@@ -254,7 +255,7 @@ public:
 
 	vector<Album> getAlbumsByArtist(string artistid) {
 		sqlite3_stmt *stmt;
-		sqlite3_prepare_v2(sqldb, "SELECT `id`, title, artistid, artist, cover FROM albums WHERE artistid=? ORDER BY `title` COLLATE NOCASE ASC", -1, &stmt, NULL);
+		sqlite3_prepare_v2(sqldb, "SELECT `id`, title, artistid, artist, hascover FROM albums WHERE artistid=? ORDER BY `title` COLLATE NOCASE ASC", -1, &stmt, NULL);
 		sqlite3_bind_text(stmt, 1, artistid.c_str(), -1, NULL);
 
 		vector<Album> albums;
@@ -267,7 +268,7 @@ public:
 
 	Album getAlbum(string id) {
 		sqlite3_stmt *stmt;
-		sqlite3_prepare_v2(sqldb, "SELECT `id`, title, artistid, artist, cover FROM albums WHERE `id`=?", -1, &stmt, NULL);
+		sqlite3_prepare_v2(sqldb, "SELECT `id`, title, artistid, artist, hascover FROM albums WHERE `id`=?", -1, &stmt, NULL);
 		sqlite3_bind_text(stmt, 1, id.c_str(), -1, NULL);
 
 		Album ret;
@@ -461,7 +462,7 @@ class file_service : public rest_service {
 				{"suffix",   song.type },
 				{"contentType", mimetypes[song.type] },
 				{"isDir",   "false" },
-				{"coverArt", (alb.cover.size() ? album_id : "") }
+				{"coverArt", (alb.hascover ? album_id : "") }
 			}));
 		}
 		return tuple<vector<Entity>, string, unsigned>(esongs, alb.title, songs.size());
@@ -517,7 +518,7 @@ class file_service : public rest_service {
 						{"artist",   album.artist },
 						{"parent",   album.artistid },
 						{"isDir",   "true" },
-						{"coverArt", (album.cover.size() ? album.id : "") }
+						{"coverArt", (album.hascover ? album.id : "") }
 					}));
 					tname = album.artist;
 				}
@@ -547,7 +548,7 @@ class file_service : public rest_service {
 					{"artist",   album.artist},
 					{"parent",   album.artistid},
 					{"isDir",   "true"},
-					{"coverArt", album.id}
+					{"coverArt", album.hascover ? album.id : ""}
 				}));
 			}
 

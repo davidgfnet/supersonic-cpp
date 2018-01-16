@@ -42,6 +42,7 @@ const char * init_sql = "\
 		`title`	TEXT,\
 		`artistid`	INTEGER,\
 		`artist`	TEXT,\
+		`hascover`	INTEGER,\
 		`cover128`	BLOB,\
 		`cover256`	BLOB,\
 		`cover512`	BLOB,\
@@ -154,6 +155,16 @@ void wfn(void *ctx, void *data, int size) {
 }
 
 void insert_album(sqlite3 * sqldb, string album, string artist, string cover) {
+	// Check for album existance first, since this is now expensive
+	uint64_t albumid = calcId(album + "@" + artist);
+	sqlite3_stmt *stmt;
+	sqlite3_prepare_v2(sqldb, "SELECT id FROM albums WHERE id=?", -1, &stmt, NULL);
+	sqlite3_bind_int64(stmt, 1, albumid);
+	bool abort = (sqlite3_step(stmt) == SQLITE_ROW);
+	sqlite3_finalize(stmt);
+
+	if (abort) return;
+
 	// Create several versions of this cover, so we can serve different sizes
 	const unsigned sizes[4] = {128, 256, 512, 1024};
 	std::string smallcover[4];
@@ -184,22 +195,22 @@ void insert_album(sqlite3 * sqldb, string album, string artist, string cover) {
 		stbi_image_free(original);
 	}
 
-	sqlite3_stmt *stmt;
 	sqlite3_prepare_v2(sqldb, "INSERT OR REPLACE INTO `albums` "
-		"(`id`, `title`, `artistid`, `artist`, `cover`,"
+		"(`id`, `title`, `artistid`, `artist`, `hascover`, `cover`,"
 		" `cover128`, `cover256`, `cover512`, `cover1024`)"
-		"  VALUES (?,?,?,?,?,?,?,?,?);", -1, &stmt, NULL);
+		"  VALUES (?,?,?,?,?,?,?,?,?,?);", -1, &stmt, NULL);
 
-	sqlite3_bind_int64(stmt, 1, calcId(album + "@" + artist));
+	sqlite3_bind_int64(stmt, 1, albumid);
 	sqlite3_bind_text (stmt, 2, album.c_str(), -1, NULL);
 	sqlite3_bind_int64(stmt, 3, calcId(artist));
 	sqlite3_bind_text (stmt, 4, artist.c_str(), -1, NULL);
-	sqlite3_bind_blob (stmt, 5, cover.data(), cover.size(), NULL);
+	sqlite3_bind_int64(stmt, 5, cover.size() ? 1 : 0);
+	sqlite3_bind_blob (stmt, 6, cover.data(), cover.size(), NULL);
 
-	sqlite3_bind_blob (stmt, 6, smallcover[0].data(), smallcover[0].size(), NULL);
-	sqlite3_bind_blob (stmt, 7, smallcover[1].data(), smallcover[1].size(), NULL);
-	sqlite3_bind_blob (stmt, 8, smallcover[2].data(), smallcover[2].size(), NULL);
-	sqlite3_bind_blob (stmt, 9, smallcover[3].data(), smallcover[3].size(), NULL);
+	sqlite3_bind_blob (stmt, 7, smallcover[0].data(), smallcover[0].size(), NULL);
+	sqlite3_bind_blob (stmt, 8, smallcover[1].data(), smallcover[1].size(), NULL);
+	sqlite3_bind_blob (stmt, 9, smallcover[2].data(), smallcover[2].size(), NULL);
+	sqlite3_bind_blob (stmt,10, smallcover[3].data(), smallcover[3].size(), NULL);
 
 	sqlite3_step(stmt);
 	sqlite3_finalize(stmt);
@@ -210,7 +221,8 @@ void insert_song(sqlite3 * sqldb, string filename, string title, string artist, 
 
 	sqlite3_stmt *stmt;
 	sqlite3_prepare_v2(sqldb, "INSERT OR REPLACE INTO `songs` "
-		"(`id`, `title`, `albumid`, `album`, `artistid`, `artist`, `type`, `genre`, `trackn`, `year`, `discn`, `duration`, `bitRate`, `filename`)"
+		"(`id`, `title`, `albumid`, `album`, `artistid`, `artist`,"
+		" `type`, `genre`, `trackn`, `year`, `discn`, `duration`, `bitRate`, `filename`)"
 		" VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?);", -1, &stmt, NULL);
 
 	sqlite3_bind_int64(stmt, 1, calcId(to_string(tn) + "@" + to_string(discn) + "@" + title + "@" + album + "@" + artist));
