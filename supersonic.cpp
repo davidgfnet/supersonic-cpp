@@ -200,16 +200,28 @@ public:
 		return false;
 	}
 
-	string getAlbumCover(string id, string size) {
+	string getAlbumCover(string id, string ssize) {
+		unsigned size = atoi(ssize.c_str());
+		const std::vector<std::string> fields = {
+			"cover128", "cover256", "cover512", "cover1024", "cover"
+		};
+		unsigned off = (size > 1024) ? 4:
+		               (size >  512) ? 3:
+		               (size >  256) ? 2:
+		               (size >  128) ? 1:0;
+
 		string ret;
-		sqlite3_stmt *stmt;
-		sqlite3_prepare_v2(sqldb, "SELECT cover FROM albums WHERE id=?", -1, &stmt, NULL);
-		sqlite3_bind_text(stmt, 1, id.c_str(), -1, NULL);
-		if (sqlite3_step(stmt) == SQLITE_ROW) {
-			auto length = sqlite3_column_bytes(stmt, 0);
-			ret = string((char*)sqlite3_column_blob(stmt, 0), length);
+		for (unsigned i = off; i < 5 && ret.empty(); i++) {
+			sqlite3_stmt *stmt;
+			sqlite3_prepare_v2(sqldb, ("SELECT " + fields[i] +
+			                           " FROM albums WHERE id=?").c_str(), -1, &stmt, NULL);
+			sqlite3_bind_text(stmt, 1, id.c_str(), -1, NULL);
+			if (sqlite3_step(stmt) == SQLITE_ROW) {
+				auto length = sqlite3_column_bytes(stmt, 0);
+				ret = string((char*)sqlite3_column_blob(stmt, 0), length);
+			}
+			sqlite3_finalize(stmt);
 		}
-		sqlite3_finalize(stmt);
 		return ret;
 	}
 

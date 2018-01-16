@@ -25,6 +25,15 @@
 #include <taglib/attachedpictureframe.h>
 #include <taglib/flacpicture.h>
 
+#define STB_IMAGE_IMPLEMENTATION
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#define STBI_WRITE_NO_STDIO
+#define STBI_NO_STDIO
+#include "stb_image.h"
+#include "stb_image_resize.h"
+#include "stb_image_write.h"
+
 using namespace std;
 
 const char * init_sql = "\
@@ -33,6 +42,10 @@ const char * init_sql = "\
 		`title`	TEXT,\
 		`artistid`	INTEGER,\
 		`artist`	TEXT,\
+		`cover128`	BLOB,\
+		`cover256`	BLOB,\
+		`cover512`	BLOB,\
+		`cover1024`	BLOB,\
 		`cover`	BLOB,\
 		PRIMARY KEY(id)\
 	);\
@@ -136,16 +149,57 @@ void insert_artist(sqlite3 * sqldb, string artist) {
 	sqlite3_finalize(stmt);
 }
 
+void wfn(void *ctx, void *data, int size) {
+	*((std::string*)ctx) += std::string((char*)data, size);
+}
+
 void insert_album(sqlite3 * sqldb, string album, string artist, string cover) {
+	// Create several versions of this cover, so we can serve different sizes
+	const unsigned sizes[4] = {128, 256, 512, 1024};
+	std::string smallcover[4];
+	if (cover.size()) {
+		int width, height, nchan;
+		stbi_uc *original = stbi_load_from_memory((uint8_t*)cover.c_str(), cover.size(),
+		                                          &width, &height, &nchan, 3);
+
+		for (unsigned i = 0; i < 4; i++) {
+			int nw, nh;
+			if (width > height) {
+				nw = sizes[i];
+				nh = sizes[i] * (double)height / (double)width;
+			}else{
+				nh = sizes[i];
+				nw = sizes[i] * (double)width / (double)height;
+			}
+
+			// We only shrink, never enlarge
+			if (nw <= width && nh <= height) {
+				unsigned osize = nw*nh*3;
+				std::string tmpb(osize, '\0');
+				stbir_resize_uint8(original, width, height, 0, (uint8_t*)&tmpb[0], nw, nh, 0, 3);
+
+				stbi_write_jpg_to_func(wfn, &smallcover[i], nw, nh, 3, tmpb.c_str(), 70);
+			}
+		}
+		stbi_image_free(original);
+	}
+
 	sqlite3_stmt *stmt;
 	sqlite3_prepare_v2(sqldb, "INSERT OR REPLACE INTO `albums` "
-		"(`id`, `title`, `artistid`, `artist`, `cover`) VALUES (?,?,?,?,?);", -1, &stmt, NULL);
+		"(`id`, `title`, `artistid`, `artist`, `cover`,"
+		" `cover128`, `cover256`, `cover512`, `cover1024`)"
+		"  VALUES (?,?,?,?,?,?,?,?,?);", -1, &stmt, NULL);
 
 	sqlite3_bind_int64(stmt, 1, calcId(album + "@" + artist));
 	sqlite3_bind_text (stmt, 2, album.c_str(), -1, NULL);
 	sqlite3_bind_int64(stmt, 3, calcId(artist));
 	sqlite3_bind_text (stmt, 4, artist.c_str(), -1, NULL);
 	sqlite3_bind_blob (stmt, 5, cover.data(), cover.size(), NULL);
+
+	sqlite3_bind_blob (stmt, 6, smallcover[0].data(), smallcover[0].size(), NULL);
+	sqlite3_bind_blob (stmt, 7, smallcover[1].data(), smallcover[1].size(), NULL);
+	sqlite3_bind_blob (stmt, 8, smallcover[2].data(), smallcover[2].size(), NULL);
+	sqlite3_bind_blob (stmt, 9, smallcover[3].data(), smallcover[3].size(), NULL);
 
 	sqlite3_step(stmt);
 	sqlite3_finalize(stmt);
