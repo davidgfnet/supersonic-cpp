@@ -175,10 +175,6 @@ public:
 			sqlite3_close(sqldb);
 	}
 
-	bool open(const char *sdb) {
-		sqlite3_open(sdb, &sqldb);
-	}
-
 	bool checkCredentials(string user, string pass) {
 		sqlite3_stmt *stmt;
 		sqlite3_prepare_v2(sqldb, "SELECT * FROM users WHERE username=? AND password=?", -1, &stmt, NULL);

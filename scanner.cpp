@@ -252,6 +252,9 @@ void scan_music_file(sqlite3 * sqldb, string fullpath) {
 	string ext = fullpath.substr(fullpath.size()-3);
 	std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
+	if (ext != "mp3" && ext != "ogg")
+		return;
+
 	TagLib::FileRef f(fullpath.c_str());
 	if (f.isNull())
 		return;
@@ -260,6 +263,18 @@ void scan_music_file(sqlite3 * sqldb, string fullpath) {
 	if (!tag)
 		return;
 
+	// Read basic properties
+	TagLib::AudioProperties *properties = f.audioProperties();
+	if (!properties)
+		return;
+
+	int discn = 0;
+	if (tag->properties().contains("DISCNUMBER"))
+		discn = tag->properties()["DISCNUMBER"][0].toInt();
+
+	std::string albumartist = tag->artist().toCString(true);
+	if (tag->properties().contains("ALBUMARTIST"))
+		albumartist = tag->properties()["ALBUMARTIST"][0].toCString(true);
 
 	string cover;
 	if (ext == "mp3") {
@@ -271,13 +286,37 @@ void scan_music_file(sqlite3 * sqldb, string fullpath) {
 			if (!frames.isEmpty()) {
 				auto frame = static_cast<TagLib::ID3v2::AttachedPictureFrame *>(frames.front());
 				cover = string(frame->picture().data(), frame->picture().size());
-				//frame->mimeType()
 			}
+			if (mp3_tag->properties().contains("ALBUMARTIST"))
+				albumartist = mp3_tag->properties()["ALBUMARTIST"][0].toCString(true);
+			if (mp3_tag->properties().contains("DISCNUMBER"))
+				discn = mp3_tag->properties()["DISCNUMBER"][0].toInt();
 		}
 	}
 	else if (ext == "ogg") {
 		auto vorbis_tag = dynamic_cast<TagLib::Ogg::XiphComment *>(tag);
 		if (vorbis_tag) {
+			// Rely on these fields better than any other generic ones.
+			if (vorbis_tag->properties().contains("ALBUMARTIST"))
+				albumartist = vorbis_tag->properties()["ALBUMARTIST"][0].toCString(true);
+			if (vorbis_tag->properties().contains("DISCNUMBER"))
+				discn = vorbis_tag->properties()["DISCNUMBER"][0].toInt();
+
+			// Extract pictures one way
+			for (auto t : std::vector<TagLib::FLAC::Picture::Type>({
+				TagLib::FLAC::Picture::FrontCover,
+				TagLib::FLAC::Picture::Media,
+				TagLib::FLAC::Picture::Other})) {
+
+				for (const auto & pic : vorbis_tag->pictureList())
+					if (pic->type() == t && cover.empty())
+						cover = std::string(pic->data().data(), pic->data().size());
+			}
+			if (vorbis_tag->pictureList().size() && cover.empty())
+				cover = std::string(vorbis_tag->pictureList()[0]->data().data(),
+				                    vorbis_tag->pictureList()[0]->data().size());
+
+			// Or another :D
 			if (vorbis_tag->properties().contains("METADATA_BLOCK_PICTURE")) {
 				auto cdata = vorbis_tag->properties()["METADATA_BLOCK_PICTURE"][0].data(TagLib::String::UTF8);
 				cover = base64Decode(string(cdata.data(), cdata.size()));
@@ -288,27 +327,12 @@ void scan_music_file(sqlite3 * sqldb, string fullpath) {
 		}
 	}
 
-	if (ext == "mp3" or ext == "ogg") {
-		TagLib::AudioProperties *properties = f.audioProperties();
-		if (!properties)
-			return;
+	insert_song(sqldb, fullpath, tag->title().toCString(true), albumartist,
+		tag->album().toCString(true), ext, tag->genre().toCString(true),
+		tag->track(), tag->year(), discn, properties->length(), properties->bitrate());
 
-		int discn = 0;
-		if (tag->properties().contains("DISCNUMBER")) {
-			discn = tag->properties()["DISCNUMBER"][0].toInt();
-		}
-		std::string albumartist = tag->artist().toCString(true);
-		if (tag->properties().contains("ALBUMARTIST")) {
-			albumartist = tag->properties()["ALBUMARTIST"][0].toCString(true);
-		}
-
-		insert_song(sqldb, fullpath, tag->title().toCString(true), albumartist,
-			tag->album().toCString(true), ext, tag->genre().toCString(true),
-			tag->track(), tag->year(), discn, properties->length(), properties->bitrate());
-
-		insert_album(sqldb, tag->album().toCString(true), albumartist, cover);
-		insert_artist(sqldb, albumartist);
-	}
+	insert_album(sqldb, tag->album().toCString(true), albumartist, cover);
+	insert_artist(sqldb, albumartist);
 }
 
 void scan_fs(sqlite3 * sqldb, string name) {
