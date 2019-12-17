@@ -29,6 +29,8 @@ string cescape(string content, bool isxml = false) {
 	string escaped;
 	for (auto c: content)
 		if (c == '"') escaped += "&quot;";
+		else if (isxml && c == '<') escaped += "&lt;";
+		else if (isxml && c == '>') escaped += "&gt;";
 		else if (isxml && c == '&') escaped += "&amp;";
 		else escaped += c;
 	return escaped;
