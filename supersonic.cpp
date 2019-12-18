@@ -178,7 +178,9 @@ public:
 	str_resp* respond() {
 		std::string rtype = isjson ? "application/json" : "text/xml";
 		std::string c = this->to_string();
-		if (!isjson)
+		if (isjson)
+			c = "{" + c + "}";
+		else
 			c = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" + c;
 		return new str_resp("Status: 200\r\n"
 			"Content-Type: " + rtype + "\r\n"
