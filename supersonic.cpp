@@ -1,39 +1,129 @@
 
 #define _FILE_OFFSET_BITS 64
-
 #include <cstdlib>
 #include <string>
 #include <iostream>
 #include <vector>
 #include <thread>
 #include <algorithm>
+#include <unordered_map>
 #include <map>
 #include <sqlite3.h>
+#include <fcgio.h>
+#include <unistd.h>
+#include <signal.h>
 
-#include <cxxhttpsrv/microrestd.h>
+#include "queue.h"
 
 using namespace std;
-using namespace cxxhttpsrv;
 
+typedef std::unordered_map<std::string, std::string> StrMap;
 enum classTypes { TYPE_ALBUM, TYPE_ARTIST, TYPE_ERROR };
 map<string, string> mimetypes = { {"mp3", "audio/mpeg"}, {"ogg", "audio/ogg"} };
 
-void panic_if(bool cond, string text) {
-	if (cond) {
-		cerr << text << endl;
-		exit(1);
+struct web_req {
+	uint64_t offset, lastbyte;
+	std::string method, host, uri;
+	StrMap vars;
+};
+
+class fcgi_responder {
+public:
+	virtual std::string respond() = 0;
+};
+
+class str_resp : public fcgi_responder {
+public:
+	str_resp(std::string c) : content(c) {}
+	virtual std::string respond() {
+		// Responds once!
+		std::string r = content;
+		content.clear();
+		return r;
 	}
+private:
+	std::string content;
+};
+
+str_resp *respond_not_found() {
+	return new str_resp(
+		"Status: 404\r\n"
+		"Content-Type: text/plain\r\n"
+		"Content-Length: 13\r\n\r\nURI not found");
 }
 
-string cescape(string content, bool isxml = false) {
-	string escaped;
-	for (auto c: content)
-		if (c == '"') escaped += "&quot;";
-		else if (isxml && c == '<') escaped += "&lt;";
-		else if (isxml && c == '>') escaped += "&gt;";
-		else if (isxml && c == '&') escaped += "&amp;";
-		else escaped += c;
-	return escaped;
+str_resp *respond_method_not_allowed() {
+	return new str_resp(
+		"Status: 405\r\n"
+		"Content-Type: text/plain\r\n"
+		"Content-Length: 18\r\n\r\nMethod not allowed");
+}
+
+static unsigned char hexdec(char c) {
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	else if (c >= 'a' && c <= 'f')
+		return c - 'a' + 10;
+	else if (c >= 'A' && c <= 'F')
+		return c - 'A' + 10;
+	return 0;
+}
+static std::string hexdecode(std::string s) {
+	if (s.size() & 1)
+		return {};
+	std::string ret;
+	for (unsigned i = 0; i < s.size(); i += 2)
+		ret.push_back((char)((hexdec(s[i]) << 4) | hexdec(s[i+1])));
+	return ret;
+}
+
+static std::string urldec(const std::string &s) {
+	std::string ret;
+	for (unsigned i = 0; i < s.size(); i++) {
+		if (s[i] == '%' && i + 2 < s.size()) {
+			ret += hexdecode(s.substr(i+1, 2));
+			i += 2;
+		}
+		else
+			ret.push_back(s[i]);
+	}
+	return ret;
+}
+
+static std::unordered_map<std::string, std::string> parse_vars(std::string body) {
+	std::unordered_map<std::string, std::string> vars;
+	size_t p = 0;
+	while (1) {
+		size_t pe = body.find('&', p);
+		std::string curv = pe != std::string::npos ? body.substr(p, pe - p) : body.substr(p);
+		size_t peq = curv.find('=');
+		if (peq != std::string::npos)
+			vars[urldec(curv.substr(0, peq))] = urldec(curv.substr(peq+1));
+		if (pe == std::string::npos)
+			break;
+		p = pe + 1;
+	}
+
+	return vars;
+}
+
+static std::pair<uint64_t, uint64_t> parse_range(std::string h) {
+	// h is like bytes=X-Y (we ignore other formats)
+	if (h.size() < 8 || h.substr(0, 6) != "bytes=")
+		return {0, ~0ULL};
+
+	h = h.substr(6);
+	uint64_t startoff = atoll(h.c_str());
+
+	auto p = h.find('-');
+	if (p == std::string::npos)
+		return {0, ~0ULL};
+
+	uint64_t csize = atoll(&h[p+1]);
+	if (h.size() <= p+1)
+		csize = ~0ULL;
+
+	return {startoff, csize};
 }
 
 class Entity {
@@ -85,13 +175,27 @@ public:
 			return "<" + name + a + ">\n" + c + "</" + name + ">\n";
 		}
 	}
-	bool respond(cxxhttpsrv::rest_request& req) {
-		if (isjson)
-			return req.respond("application/json", "{" + this->to_string() + "}");
-		else
-			return req.respond("text/xml", "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
-			                   this->to_string());
+	str_resp* respond() {
+		std::string rtype = isjson ? "application/json" : "text/xml";
+		std::string c = this->to_string();
+		if (!isjson)
+			c = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" + c;
+		return new str_resp("Status: 200\r\n"
+			"Content-Type: " + rtype + "\r\n"
+			"Content-Length: " + std::to_string(c.size()) + "\r\n\r\n" + c);
 	}
+
+	static string cescape(string content, bool isxml = false) {
+		string escaped;
+		for (auto c: content)
+			if (c == '"') escaped += "&quot;";
+			else if (isxml && c == '<') escaped += "&lt;";
+			else if (isxml && c == '>') escaped += "&gt;";
+			else if (isxml && c == '&') escaped += "&amp;";
+			else escaped += c;
+		return escaped;
+	}
+
 	static Entity wrap(Entity e) {
 		return Entity(e.isjson, "subsonic-response",
 		              {{"status", "ok"}, {"version", "1.9.0"}}, e);
@@ -162,20 +266,7 @@ public:
 
 class DataModel {
 public:
-	DataModel(string database_path) {
-		int ok = sqlite3_open_v2(
-			database_path.c_str(),
-			&sqldb,
-			SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX,
-			NULL
-		);
-		panic_if(ok != SQLITE_OK, "Could not open sqlite3 database!");
-	}
-
-	~DataModel() {
-		if (sqldb)
-			sqlite3_close(sqldb);
-	}
+	DataModel(sqlite3* sqldb) : sqldb(sqldb) { }
 
 	bool checkCredentials(string user, string pass) {
 		sqlite3_stmt *stmt;
@@ -344,29 +435,6 @@ private:
 	sqlite3 * sqldb;
 };
 
-static string dehexify(string in) {
-	string out;
-	for (unsigned i = 0; i < in.size()/2; i++) {
-		unsigned char hi = 0, lo = 0;
-		if (in[2*i] >= '0' and in[2*i] <= '9')
-			hi = in[2*i] - '0';
-		else if (in[2*i] >= 'a' and in[2*i] <= 'f')
-			hi = in[2*i] - 'a' + 10;
-		else if (in[2*i] >= 'A' and in[2*i] <= 'F')
-			hi = in[2*i] - 'A' + 10;
-
-		if (in[2*i+1] >= '0' and in[2*i+1] <= '9')
-			lo = in[2*i+1] - '0';
-		else if (in[2*i+1] >= 'a' and in[2*i+1] <= 'f')
-			lo = in[2*i+1] - 'a' + 10;
-		else if (in[2*i+1] >= 'A' and in[2*i+1] <= 'F')
-			lo = in[2*i+1] - 'A' + 10;
-
-		out += (char)((hi << 4) | lo);
-	}
-	return out;
-}
-
 static uint64_t fsize(FILE *fd) {
 	fseeko(fd, 0, SEEK_END);
 	uint64_t r = ftello(fd);
@@ -374,75 +442,93 @@ static uint64_t fsize(FILE *fd) {
 	return r;
 }
 
-class file_service : public rest_service {
-	class file_generator : public response_generator {
-	public:
-		file_generator(FILE* f, uint64_t offset = 0, uint64_t size = ~0)
-		  : f(f), ret_size(size) {
+class SupersonicServer {
+private:
+	// Datamodel
+	DataModel *model;
 
+	// Thread to spawn
+	std::thread cthread;
+
+	// Shared queue
+	ConcurrentQueue<std::unique_ptr<FCGX_Request>> *rq;
+
+	// Signal end of workers
+	bool end;
+
+	class stream_responder : public fcgi_responder {
+	public:
+		stream_responder(FILE* f, uint64_t offset = 0, uint64_t size = ~0ULL)
+		  : f(f), offset(offset), ret_size(size), header(false) {
 			// Seek to offset
 			fseeko(f, offset, SEEK_SET);
 		}
-		~file_generator() { if (f) fclose(f); }
+		~stream_responder() { if (f) fclose(f); }
 
-		virtual bool generate() override {
-			const size_t blocksize = 128*1024;
+		virtual std::string respond() {
+			if (!header) {
+				header = true;
+				if (ret_size != ~0ULL || offset > 0)
+					return "Status: 206\r\n"
+						"Content-Type: application/octet-stream\r\n"
+						"Content-Range: bytes " +
+							std::to_string(offset) + "-" + std::to_string(offset + ret_size - 1) + "/*\r\n"
+						"Content-Length: " + std::to_string(ret_size) + "\r\n\r\n";
+				else
+					return "Status: 200\r\n"
+						"Content-Type: application/octet-stream\r\n"
+						"Content-Length: " + std::to_string(ret_size) + "\r\n\r\n";
+			}
+
+			// Send "small" chunks as response, so we can easily abort if needed.
+			const size_t blocksize = 64*1024;
 			size_t toread = ret_size < blocksize ? ret_size : blocksize;
 			if (!toread)
-				return 0;
+				return {};   // EOF
 
-			size_t data_size = data.size();
-			data.resize(data_size + toread);
-			size_t read = fread(data.data() + data_size, 1, toread, f);
-			data.resize(data_size + read);
-
-			ret_size -= read;
-			return read;
-		}
-		virtual string_piece current() const override {
-			return string_piece(data.data(), data.size());
-		}
-		virtual void consume(size_t length) override {
-			if (length >= data.size()) data.clear();
-			else if (length) data.erase(data.begin(), data.begin() + length);
+			char tmpbuf[blocksize];
+			size_t read = fread(tmpbuf, 1, toread, f);
+			if (read >= 0) {
+				ret_size -= read;
+				return std::string(tmpbuf, read);
+			}
+			return {};
 		}
 
 	private:
 		FILE* f;
-		uint64_t ret_size;
-		vector<char> data;
+		uint64_t offset, ret_size;
+		bool header;
 	};
 
-	bool checkCredentials(rest_request& req) {
-		string user = req.params["u"];
+	bool checkCredentials(web_req& req) {
+		string user = req.vars["u"];
 		if (user.empty())
 			return false;
 
-		if (!req.params["p"].empty()) {
-			string pass = req.params["p"];
+		if (!req.vars["p"].empty()) {
+			string pass = req.vars["p"];
 			if (pass.substr(0, 4) == "enc:")
-				pass = dehexify(pass.substr(4));
-			return model.checkCredentials(user, pass);
+				pass = hexdecode(pass.substr(4));
+			return model->checkCredentials(user, pass);
 		}
-		if (!req.params["s"].empty() && !req.params["t"].empty()) {
-			return model.checkCredentialsMD5(user, req.params["t"], req.params["s"]);
+		if (!req.vars["s"].empty() && !req.vars["t"].empty()) {
+			return model->checkCredentialsMD5(user, req.vars["t"], req.vars["s"]);
 		}
 		return false;
 	}
 
-	bool authErr(rest_request & req) {
-		bool rjson = (req.params["f"] == "json");
-		return Entity::error(rjson, 40, "Wrong username or password").respond(req);
+	str_resp* authErr(web_req & req) {
+		bool rjson = (req.vars["f"] == "json");
+		return Entity::error(rjson, 40, "Wrong username or password").respond();
 	}
-
-	DataModel model;
 
 	// Returns Entities, album Name and song count
 	tuple<vector<Entity>, string, unsigned> listSongs(bool rjson,
 		string node, string album_id) {
 
-		Album alb = model.getAlbum(album_id);
-		auto songs = model.getSongsByAlbum(album_id);
+		Album alb = model->getAlbum(album_id);
+		auto songs = model->getSongsByAlbum(album_id);
 		vector<Entity> esongs;
 		for (auto song: songs) {
 			esongs.push_back(Entity(rjson, node, {
@@ -466,49 +552,27 @@ class file_service : public rest_service {
 		return tuple<vector<Entity>, string, unsigned>(esongs, alb.title, songs.size());
 	}
 
-	public:
-	virtual bool handle_partial(rest_request& req) override {
-		if (req.method != "HEAD" && req.method != "GET" && req.method != "POST") return req.respond_method_not_allowed("HEAD, GET, POST");
+	fcgi_responder* handle(web_req& req, FCGX_Request *fastcgi_req) {
+		if (req.method != "HEAD" && req.method != "GET" && req.method != "POST")
+			return respond_method_not_allowed();
 
 		// Check for auth user and kick out intruders
 		if (!checkCredentials(req))
 			return authErr(req);
 
-		if (req.url == "/rest/stream.view") {
-			// Lookup song_id and get a file name!
-			string song_id = req.params["id"];
-			FILE * fd = model.getSongFile(song_id);
-            uint64_t max_filesize = fsize(fd) - req.offset;
-            if (req.max_size > max_filesize) req.max_size = max_filesize;
+		bool rjson = (req.vars["f"] == "json");
 
-			string partdesc = to_string(req.offset) + "-" + to_string(req.offset + req.max_size - 1) + "/*";
-			if (fd)
-				return req.respond_partial("application/octet-stream", new file_generator(fd, req.offset, req.max_size), partdesc);
-		}
-
-        return false; // Fallback to non-partial request
-    }
-
-	virtual bool handle(rest_request& req) override {
-		if (req.method != "HEAD" && req.method != "GET" && req.method != "POST") return req.respond_method_not_allowed("HEAD, GET, POST");
-
-		// Check for auth user and kick out intruders
-		if (!checkCredentials(req))
-			return authErr(req);
-
-		bool rjson = (req.params["f"] == "json");
-
-		if (req.url == "/rest/getMusicDirectory.view") {
+		if (req.uri == "/rest/getMusicDirectory.view") {
 			vector<Entity> entities;
 			string tname;
-			switch (model.classifyId(req.params["id"])) {
+			switch (model->classifyId(req.vars["id"])) {
 			case TYPE_ALBUM: {
-				auto songs = listSongs(rjson, "child", req.params["id"]);
+				auto songs = listSongs(rjson, "child", req.vars["id"]);
 				entities = get<0>(songs);
 				tname = get<1>(songs);
 				} break;
 			case TYPE_ARTIST: {
-				auto albums = model.getAlbumsByArtist(req.params["id"]);
+				auto albums = model->getAlbumsByArtist(req.vars["id"]);
 				for (auto album: albums) {
 					entities.push_back(Entity(rjson, "child", {
 						{"id",       album.id },
@@ -524,21 +588,21 @@ class file_service : public rest_service {
 			};
 
 			return Entity::wrap(Entity(rjson, "directory", {
-			                    {"id", req.params["id"]},
+			                    {"id", req.vars["id"]},
 			                    {"name", tname}},
-			                    entities)).respond(req);
+			                    entities)).respond();
 		}
-		else if (req.url == "/rest/getAlbumList.view" or req.url == "/rest/getAlbumList2.view") {
+		else if (req.uri == "/rest/getAlbumList.view" or req.uri == "/rest/getAlbumList2.view") {
 			unsigned offset = 0, size = 50;
 			try {
-				offset = stoul(req.params["offset"]);
+				offset = stoul(req.vars["offset"]);
 			} catch (...) {}
 			try {
-				size   = stoul(req.params["size"]);
+				size   = stoul(req.vars["size"]);
 			} catch (...) {}
 
 			vector<Entity> ealbums;
-			auto albums = model.getAllAlbumsSorted(offset, size);
+			auto albums = model->getAllAlbumsSorted(offset, size);
 			for (auto album: albums) {
 				ealbums.push_back(Entity(rjson, "album", {
 					{"id",       album.id},
@@ -550,27 +614,27 @@ class file_service : public rest_service {
 				}));
 			}
 
-			string tag = (req.url == "/rest/getAlbumList2.view") ? "albumList2" : "albumList";
-			return Entity::wrap(Entity(rjson, tag, {}, ealbums)).respond(req);
+			string tag = (req.uri == "/rest/getAlbumList2.view") ? "albumList2" : "albumList";
+			return Entity::wrap(Entity(rjson, tag, {}, ealbums)).respond();
 		}
 
-		else if (req.url == "/rest/getAlbum.view") {
-			auto songs = listSongs(rjson, "song", req.params["id"]);
+		else if (req.uri == "/rest/getAlbum.view") {
+			auto songs = listSongs(rjson, "song", req.vars["id"]);
 			return Entity::wrap(Entity(rjson, "album", {
-			                    {"id",        req.params["id"]},
+			                    {"id",        req.vars["id"]},
 			                    {"name",      get<1>(songs)},
 			                    {"songCount", to_string(get<2>(songs))},
-			                    {"coverArt",  req.params["id"]}},
-			                    get<0>(songs))).respond(req);
+			                    {"coverArt",  req.vars["id"]}},
+			                    get<0>(songs))).respond();
 		}
 
-		else if (req.url == "/rest/getRandomSongs.view") {
+		else if (req.uri == "/rest/getRandomSongs.view") {
 			unsigned size = 10;
 			try {
-				size = stoul(req.params["size"]);
+				size = stoul(req.vars["size"]);
 			} catch (...) {}
 
-			auto songs = model.getRandomSongs(size);
+			auto songs = model->getRandomSongs(size);
 			vector<Entity> esongs;
 			for (auto song: songs) {
 				esongs.push_back(Entity(rjson, "song", {
@@ -592,12 +656,12 @@ class file_service : public rest_service {
 				}));
 			}
 
-			return Entity::wrap(Entity(rjson, "randomSongs", {}, esongs)).respond(req);
+			return Entity::wrap(Entity(rjson, "randomSongs", {}, esongs)).respond();
 		}
 
-		else if (req.url == "/rest/getIndexes.view") {
+		else if (req.uri == "/rest/getIndexes.view") {
 			vector<Entity> eartists;
-			for (auto artist: model.getArtists())
+			for (auto artist: model->getArtists())
 				eartists.push_back(Entity(rjson, "artist", 
 					{ {"id", artist.id}, {"name", artist.name} }));
 
@@ -605,38 +669,50 @@ class file_service : public rest_service {
 			                    {"lastModified", "1455843830000"},  // FIXME: Unix timestamp * 1000
 			                    {"ignoredArticles", "The El La Los Las Le Les"}},
 			                    vector<Entity>{
-			                    Entity(rjson, "index", {{"name", "Music"}}, eartists)})).respond(req);
+			                    Entity(rjson, "index", {{"name", "Music"}}, eartists)})).respond();
 		}
 
-		else if (req.url == "/rest/getCoverArt.view") {
-			return req.respond("image/jpeg", model.getAlbumCover(req.params["id"], req.params["size"]));
+		else if (req.uri == "/rest/getCoverArt.view") {
+			std::string img = model->getAlbumCover(req.vars["id"], req.vars["size"]);
+			return new str_resp("Status: 200\r\n"
+				"Content-Type: image/jpeg\r\n"
+				"Content-Length: " + std::to_string(img.size()) + "\r\n\r\n" + img);
 		}
-		else if (req.url == "/rest/stream.view") {
+		else if (req.uri == "/rest/stream.view") {
 			// Lookup song_id and get a file name!
-			string song_id = req.params["id"];
-			FILE * fd = model.getSongFile(song_id);
-			if (fd)
-				return req.respond("application/octet-stream", new file_generator(fd));
+			string song_id = req.vars["id"];
+			FILE * fd = model->getSongFile(song_id);
+			if (fd) {
+				  // Easier to count this way, prevent overflow
+				req.lastbyte = std::max(req.lastbyte, req.lastbyte + 1);
+				uint64_t fsz = fsize(fd);
+	            //uint64_t max_filesize = fsize(fd) - req.offset;
+	            if (req.lastbyte > fsz)
+					req.lastbyte = fsz;
+
+				if (req.lastbyte > req.offset)
+					return new stream_responder(fd, req.offset, req.lastbyte - req.offset);
+			}
 		}
 
 		// Misc stuff, needs to be there just to make clients happy :)
-		else if (req.url == "/rest/getMusicFolders.view") {
+		else if (req.uri == "/rest/getMusicFolders.view") {
 			return Entity::wrap(Entity(rjson, "musicFolders", {}, vector<Entity>{
 			                    Entity(rjson, "musicFolder", {
 			                            {"id", "1"},
 			                            {"name", "Music"},
-			                    })})).respond(req);
+			                    })})).respond();
 		}
-		else if (req.url == "/rest/getLicense.view") {
+		else if (req.uri == "/rest/getLicense.view") {
 			return Entity::wrap(Entity(rjson, "license", {
 			                    {"valid", "true"},
 			                    {"email", "example@example.com"},
-			                    {"key",   "ABC123DEF"}})).respond(req);
+			                    {"key",   "ABC123DEF"}})).respond();
 		}
-		else if (req.url == "/rest/ping.view") {
-			return Entity::wrap(rjson).respond(req);
+		else if (req.uri == "/rest/ping.view") {
+			return Entity::wrap(rjson).respond();
 		}
-		else if (req.url == "/rest/getUser.view") {
+		else if (req.uri == "/rest/getUser.view") {
 			return Entity::wrap(Entity(rjson, "user", {
 			                    {"username",     "admin"},
 			                    {"email",        "admin@example.com"},
@@ -652,49 +728,118 @@ class file_service : public rest_service {
 			                    {"streamRole",   "false"},
 			                    {"jukeboxRole",  "false"},
 			                    {"shareRole",    "false"},
-			                    })).respond(req);
+			                    })).respond();
 		}
 
-		return req.respond_not_found();
+		return respond_not_found();
 	}
 
-	file_service(string dbpath)
-	: model(dbpath) {
-		//
+public:
+	SupersonicServer(DataModel *dbm, ConcurrentQueue<std::unique_ptr<FCGX_Request>> *rq)
+	: model(dbm), rq(rq) {
+		cthread = std::thread(&SupersonicServer::work, this);
 	}
 
-	~file_service() {
-		//
+	~SupersonicServer() {
+		cthread.join();
+	}
+
+	// Receives requests and processes them by replying via a side http call.
+	void work() {
+		std::unique_ptr<FCGX_Request> req;
+		while (rq->pop(&req)) {
+			// Get streams to write
+			fcgi_streambuf reqout(req->out);
+			std::iostream obuf(&reqout);
+
+			// Parse inputs
+			web_req wreq;
+			wreq.method   = FCGX_GetParam("REQUEST_METHOD", req->envp) ?: "";
+			wreq.uri      = FCGX_GetParam("DOCUMENT_URI", req->envp) ?: "";
+			wreq.vars     = parse_vars(FCGX_GetParam("QUERY_STRING", req->envp) ?: "");
+			wreq.host     = FCGX_GetParam("HTTP_HOST", req->envp) ?: "";
+			std::tie(wreq.offset, wreq.lastbyte) = parse_range(FCGX_GetParam("HTTP_RANGE", req->envp) ?: "");
+
+			std::unique_ptr<fcgi_responder> resp(this->handle(wreq, req.get()));
+
+			// Respond with an immediate update JSON encoded too
+			while (1) {
+				std::string r = resp->respond();
+				// Stop if EOF or there was a write error (pipe broken most likely)
+				if (r.empty() || FCGX_GetError(req->out))
+					break;
+				obuf << r;
+			}
+
+			FCGX_Finish_r(req.get());
+			req.reset();
+		}
 	}
 };
 
-int main(int argc, char* argv[]) {
-	if (argc < 3) {
-		fprintf(stderr, "Usage: %s database port [threads] [connection_limit]\n", argv[0]);
+bool serving = true;
+void sighandler(int) {
+	std::cerr << "Signal caught" << std::endl;
+	// Just tweak a couple of vars really
+	serving = false;
+	// Ask for CGI lib shutdown
+	FCGX_ShutdownPending();
+	// Close stdin so we stop accepting
+	close(0);
+}
+
+int main(int argc, char **argv) {
+	if (argc < 2) {
+		std::cerr << "Usage: " << argv[0] << " database [nthreads]" << std::endl;
 		return 1;
 	}
-	string database = argv[1];
-	int port = stoi(argv[2]);
-	int threads = argc >= 4 ? stoi(argv[3]) : 0;
-	int connection_limit = argc >= 5 ? stoi(argv[4]) : 2;
 
-	rest_server server;
-	rest_server::set_x509_cert("server.cert", "server.key");
-
-	server.set_log_file(stderr);
-	server.set_max_connections(connection_limit);
-	server.set_threads(threads);
-
-	cerr << "Loading sqlite database " << database << " ..." << endl;
-	file_service service(database);
-	if (!server.start(&service, port, true)) {
-		fprintf(stderr, "Cannot start REST server!\n");
+	// Initialize the database backend.
+	sqlite3* sqldb;
+	if (SQLITE_OK != sqlite3_open_v2(argv[1], &sqldb, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, NULL)) {
+		std::cerr << "Could not open sqlite3 database!" << std::endl;
 		return 1;
 	}
-	server.wait_until_signalled();
-	server.stop();
 
-	return 0;
+	// Start FastCGI interface
+	FCGX_Init();
+
+	// Signal handling
+	signal(SIGINT, sighandler); 
+	signal(SIGTERM, sighandler);
+	signal(SIGPIPE, SIG_IGN);
+
+	// Start worker threads for this
+	unsigned nthreads = (argc >= 3) ? (atoi(argv[2]) & 255) : 4;
+
+	DataModel dbm(sqldb);
+	ConcurrentQueue<std::unique_ptr<FCGX_Request>> reqqueue;
+	SupersonicServer *workers[nthreads];
+	for (unsigned i = 0; i < nthreads; i++)
+		workers[i] = new SupersonicServer(&dbm, &reqqueue);
+
+	std::cerr << "All workers up, serving until SIGINT/SIGTERM" << std::endl;
+
+	// Now keep ingesting incoming requests, we do this in the main
+	// thread since threads are much slower, unlikely to be a bottleneck.
+	while (serving) {
+		std::unique_ptr<FCGX_Request> request(new FCGX_Request());
+		FCGX_InitRequest(request.get(), 0, 0);
+
+		if (FCGX_Accept_r(request.get()) >= 0)
+			// Get a worker that's free and queue it there
+			reqqueue.push(std::move(request));
+	}
+
+	std::cerr << "Signal caught! Starting shutdown" << std::endl;
+	reqqueue.close();
+
+	// Just go ahead and delete workers
+	for (unsigned i = 0; i < nthreads; i++)
+		delete workers[i];
+
+	std::cerr << "All clear, service is down" << std::endl;
+	sqlite3_close(sqldb);
 }
 
 
