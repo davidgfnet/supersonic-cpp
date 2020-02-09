@@ -3,9 +3,11 @@
 #include <cstdlib>
 #include <string>
 #include <iostream>
+#include <list>
 #include <vector>
 #include <thread>
 #include <algorithm>
+#include <memory>
 #include <unordered_map>
 #include <map>
 #include <sqlite3.h>
@@ -13,13 +15,16 @@
 #include <unistd.h>
 #include <signal.h>
 
+#include "util.h"
 #include "queue.h"
+#include "datamodel.h"
 
 using namespace std;
 
 typedef std::unordered_map<std::string, std::string> StrMap;
-enum classTypes { TYPE_ALBUM, TYPE_ARTIST, TYPE_ERROR };
 map<string, string> mimetypes = { {"mp3", "audio/mpeg"}, {"ogg", "audio/ogg"} };
+enum fmtType { TYPE_XML, TYPE_JSON, TYPE_JSONP };
+enum datType { DATA_STR, DATA_INT, DATA_BOOL, DATA_NULL };
 
 struct web_req {
 	uint64_t offset, lastbyte;
@@ -27,67 +32,103 @@ struct web_req {
 	StrMap vars;
 };
 
+struct DataField {
+	datType type;
+	std::string str;
+	long long integer;
+	bool boolean;
+
+	bool null() const { return type == DATA_NULL; }
+	std::string tostr(bool isxml) const {
+		switch (type) {
+		case DATA_STR:
+			return "\"" + cescape(str, isxml) + "\"";
+		case DATA_INT:
+			if (isxml)
+				return "\"" + std::to_string(integer) + "\"";
+			return std::to_string(integer);
+		case DATA_BOOL:
+			if (isxml)
+				return "\"" + std::string(boolean ? "true" : "false") + "\"";
+			return boolean ? "true" : "false";
+		};
+		return {};
+	}
+};
+
+#define DS(x) DataField{.type = DATA_STR, .str = (x), .integer = 0, .boolean = false}
+#define DI(x) DataField{.type = DATA_INT, .str = "", .integer = (long long)(x), .boolean = false}
+#define DB(x) DataField{.type = DATA_BOOL, .str = "", .integer = 0, .boolean = (x)}
+#define DN()  DataField{.type = DATA_NULL, .str = "", .integer = 0, .boolean = false}
+
+class RespFmt {
+public:
+	RespFmt(std::string fmt_str, std::string extended) : extended(extended) {
+		if (fmt_str == "json")
+			fmt = TYPE_JSON;
+		else if (fmt_str == "jsonp")
+			fmt = TYPE_JSONP;
+		else
+			fmt = TYPE_XML;
+	}
+	bool isjson() const { return fmt != TYPE_XML; }
+	std::string mime() const {
+		const char *types[] = {
+			"text/xml",
+			"application/json",
+			"application/javascript"
+		};
+		return types[fmt];
+	}
+	std::string wrap(std::string c) {
+		switch (fmt) {
+		case TYPE_JSON:
+			return "{" + c + "}";
+		case TYPE_JSONP:
+			return extended + "({" + c + "});";
+		default:
+			return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" + c;
+		};
+	}
+
+	fmtType fmt;
+	std::string extended;
+};
+
 class fcgi_responder {
 public:
+	virtual std::string header() = 0;
 	virtual std::string respond() = 0;
 };
 
 class str_resp : public fcgi_responder {
 public:
-	str_resp(std::string c) : content(c) {}
+	str_resp(std::string h, std::string b) : head(h), body(b) {}
+	virtual std::string header() {
+		return head;
+	}
 	virtual std::string respond() {
 		// Responds once!
-		std::string r = content;
-		content.clear();
+		std::string r = body;
+		body.clear();
 		return r;
 	}
 private:
-	std::string content;
+	std::string head, body;
 };
 
 str_resp *respond_not_found() {
 	return new str_resp(
 		"Status: 404\r\n"
 		"Content-Type: text/plain\r\n"
-		"Content-Length: 13\r\n\r\nURI not found");
+		"Content-Length: 13\r\n\r\n", "URI not found");
 }
 
 str_resp *respond_method_not_allowed() {
 	return new str_resp(
 		"Status: 405\r\n"
 		"Content-Type: text/plain\r\n"
-		"Content-Length: 18\r\n\r\nMethod not allowed");
-}
-
-static unsigned char hexdec(char c) {
-	if (c >= '0' && c <= '9')
-		return c - '0';
-	else if (c >= 'a' && c <= 'f')
-		return c - 'a' + 10;
-	else if (c >= 'A' && c <= 'F')
-		return c - 'A' + 10;
-	return 0;
-}
-static std::string hexdecode(std::string s) {
-	if (s.size() & 1)
-		return {};
-	std::string ret;
-	for (unsigned i = 0; i < s.size(); i += 2)
-		ret.push_back((char)((hexdec(s[i]) << 4) | hexdec(s[i+1])));
-	return ret;
-}
-
-static std::string urldec(const std::string &s) {
-	std::string ret;
-	for (unsigned i = 0; i < s.size(); i++) {
-		if (s[i] == '%' && i + 2 < s.size()) {
-			ret += hexdecode(s.substr(i+1, 2));
-			i += 2;
-		}
-		else
-			ret.push_back(s[i]);
-	}
-	return ret;
+		"Content-Length: 18\r\n\r\n", "Method not allowed");
 }
 
 static std::unordered_map<std::string, std::string> parse_vars(std::string body) {
@@ -128,29 +169,30 @@ static std::pair<uint64_t, uint64_t> parse_range(std::string h) {
 
 class Entity {
 public:
-	Entity(bool isjson, string name, map<string, string> attrs, vector<Entity> cvec = {})
-	 : isjson(isjson), vrep(true), name(name), attrs(attrs) {
+	Entity(RespFmt rfmt, string name, map<string, DataField> attrs, list<Entity> cvec = {})
+	 : rfmt(rfmt), vrep(true), name(name), attrs(attrs) {
 		for (auto c: cvec)
 			content[c.name].push_back(c);
 	}
 
-	Entity(bool isjson, string name, map<string, string> attrs, Entity e)
-	 : isjson(isjson), vrep(false), name(name), attrs(attrs) {
+	Entity(RespFmt rfmt, string name, map<string, DataField> attrs, Entity e)
+	 : rfmt(rfmt), vrep(false), name(name), attrs(attrs) {
 		content[e.name].push_back(e);
 	}
 
 	string to_string() const {
-		if (isjson)
+		if (rfmt.isjson())
 			return "\"" + name + "\": " + this->content_string();
 		else
 			return this->content_string();
 	}
 
 	string content_string() const {
-		if (isjson) {
+		if (rfmt.isjson()) {
 			string c;
 			for (const auto it: attrs)
-				c += "\"" + it.first + "\": \"" + cescape(it.second) + "\",\n";
+				if (!it.second.null())
+					c += "\"" + it.first + "\": " + it.second.tostr(false) + ",\n";
 			for (const auto it: content) {
 				if (vrep) {
 					c += "\"" + cescape(it.first) + "\": [\n";
@@ -159,7 +201,7 @@ public:
 					c = c.substr(0, c.size()-2);
 					c += "],\n";
 				} else {
-					c += it.second[0].to_string() + "\n";
+					c += it.second.front().to_string() + "\n";
 				}
 			}
 			if (attrs.size() || content.size())
@@ -168,7 +210,8 @@ public:
 		}else{
 			string a, c;
 			for (const auto it: attrs)
-				a += " " + it.first + "=\"" + cescape(it.second, true) + "\"";
+				if (!it.second.null())
+					a += " " + it.first + "=" + it.second.tostr(true) + "";
 			for (const auto it: content)
 				for (const auto e: it.second)
 					c += e.to_string();
@@ -176,265 +219,33 @@ public:
 		}
 	}
 	str_resp* respond() {
-		std::string rtype = isjson ? "application/json" : "text/xml";
-		std::string c = this->to_string();
-		if (isjson)
-			c = "{" + c + "}";
-		else
-			c = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" + c;
+		std::string rtype = rfmt.mime();
+		std::string c = rfmt.wrap(this->to_string());
 		return new str_resp("Status: 200\r\n"
 			"Content-Type: " + rtype + "\r\n"
-			"Content-Length: " + std::to_string(c.size()) + "\r\n\r\n" + c);
+			"Content-Length: " + std::to_string(c.size()) + "\r\n\r\n", c);
 	}
 
-	static string cescape(string content, bool isxml = false) {
-		string escaped;
-		for (auto c: content)
-			if (c == '"') escaped += "&quot;";
-			else if (isxml && c == '<') escaped += "&lt;";
-			else if (isxml && c == '>') escaped += "&gt;";
-			else if (isxml && c == '&') escaped += "&amp;";
-			else escaped += c;
-		return escaped;
-	}
 
 	static Entity wrap(Entity e) {
-		return Entity(e.isjson, "subsonic-response",
-		              {{"status", "ok"}, {"version", "1.9.0"}}, e);
+		return Entity(e.rfmt, "subsonic-response",
+		              {{"status", DS("ok")}, {"version", DS("1.9.0")}}, e);
 	}
-	static Entity wrap(bool isjson) {
-		return Entity(isjson, "subsonic-response",
-		              {{"status", "ok"}, {"version", "1.9.0"}});
+	static Entity wrap(RespFmt fmt) {
+		return Entity(fmt, "subsonic-response",
+		              {{"status", DS("ok")}, {"version", DS("1.9.0")}});
 	}
-	static Entity error(bool isjson, unsigned code, string content) {
-		return Entity(isjson, "subsonic-response",
-		              {{"status", "failed"}, {"version", "1.9.0"}},
-		              Entity(isjson, "error", {{"code", std::to_string(code)}, {"message", content}}));
+	static Entity error(RespFmt fmt, unsigned code, string content) {
+		return Entity(fmt, "subsonic-response",
+		              {{"status", DS("failed")}, {"version", DS("1.9.0")}},
+		              Entity(fmt, "error", {{"code", DI(code)}, {"message", DS(content)}}));
 	}
 
-	bool isjson, vrep;
+	RespFmt rfmt;
+	bool vrep;
 	string name;
-	map<string, string> attrs;
-	map<string, vector<Entity>> content;
-};
-
-class Artist {
-public:
-	Artist(sqlite3_stmt * stmt) {
-		id       = string((char*)sqlite3_column_text (stmt, 0));
-		name     = string((char*)sqlite3_column_text (stmt, 1));
-	}
-	string id, name;
-};
-
-class Album {
-public:
-	Album() {}
-	Album(sqlite3_stmt * stmt) {
-		id       = string((char*)sqlite3_column_text (stmt, 0));
-		title    = string((char*)sqlite3_column_text (stmt, 1));
-		artistid = string((char*)sqlite3_column_text (stmt, 2));
-		artist   = string((char*)sqlite3_column_text (stmt, 3));
-		hascover = sqlite3_column_int(stmt, 4);
-	}
-	string id, title, artistid, artist;
-	int hascover;
-};
-
-class Song {
-public:
-	string id, title, albumid, album, artistid, artist;
-	unsigned trackn, duration, year, discn, bitRate;
-	string genre, type;
-
-	Song(sqlite3_stmt * stmt) {
-		id       = string((char*)sqlite3_column_text (stmt, 0));
-		title    = string((char*)sqlite3_column_text (stmt, 1));
-		albumid  = string((char*)sqlite3_column_text (stmt, 2));
-		album    = string((char*)sqlite3_column_text (stmt, 3));
-		artistid = string((char*)sqlite3_column_text (stmt, 4));
-		artist   = string((char*)sqlite3_column_text (stmt, 5));
-
-		trackn   = sqlite3_column_int(stmt, 6);
-		discn    = sqlite3_column_int(stmt, 7);
-		year     = sqlite3_column_int(stmt, 8);
-		duration = sqlite3_column_int(stmt, 9);
-		bitRate  = sqlite3_column_int(stmt,10);
-
-		genre    = string((char*)sqlite3_column_text (stmt,11));
-		type     = string((char*)sqlite3_column_text (stmt,12));
-	}
-};
-
-class DataModel {
-public:
-	DataModel(sqlite3* sqldb) : sqldb(sqldb) { }
-
-	bool checkCredentials(string user, string pass) {
-		sqlite3_stmt *stmt;
-		sqlite3_prepare_v2(sqldb, "SELECT * FROM users WHERE username=? AND password=?", -1, &stmt, NULL);
-		sqlite3_bind_text(stmt, 1, user.c_str(), -1, NULL);
-		sqlite3_bind_text(stmt, 2, pass.c_str(), -1, NULL);
-		bool res = (sqlite3_step(stmt) == SQLITE_ROW);
-		sqlite3_finalize(stmt);
-		return res;
-	}
-
-	bool checkCredentialsMD5(string user, string token, string salt) {
-		sqlite3_stmt *stmt;
-		sqlite3_prepare_v2(sqldb, "SELECT * FROM users WHERE username=?", -1, &stmt, NULL);
-		sqlite3_bind_text(stmt, 1, user.c_str(), -1, NULL);
-		if (sqlite3_step(stmt) == SQLITE_ROW) {
-			// Query pass and get MD5, compare
-			return false;
-		}
-		sqlite3_finalize(stmt);
-		return false;
-	}
-
-	string getAlbumCover(string id, string ssize) {
-		unsigned size = atoi(ssize.c_str());
-		const std::vector<std::string> fields = {
-			"cover128", "cover256", "cover512", "cover1024", "cover"
-		};
-		unsigned off = (size > 1024) ? 4:
-		               (size >  512) ? 3:
-		               (size >  256) ? 2:
-		               (size >  128) ? 1:0;
-
-		string ret;
-		for (unsigned i = off; i < 5 && ret.empty(); i++) {
-			sqlite3_stmt *stmt;
-			sqlite3_prepare_v2(sqldb, ("SELECT " + fields[i] +
-			                           " FROM albums WHERE id=?").c_str(), -1, &stmt, NULL);
-			sqlite3_bind_text(stmt, 1, id.c_str(), -1, NULL);
-			if (sqlite3_step(stmt) == SQLITE_ROW) {
-				auto length = sqlite3_column_bytes(stmt, 0);
-				ret = string((char*)sqlite3_column_blob(stmt, 0), length);
-			}
-			sqlite3_finalize(stmt);
-		}
-		return ret;
-	}
-
-	FILE * getSongFile(string id) {
-		string filename;
-		sqlite3_stmt *stmt;
-		sqlite3_prepare_v2(sqldb, "SELECT filename FROM songs WHERE id=?", -1, &stmt, NULL);
-		sqlite3_bind_text(stmt, 1, id.c_str(), -1, NULL);
-		if (sqlite3_step(stmt) == SQLITE_ROW) {
-			filename = (char*)sqlite3_column_text (stmt, 0);
-		}
-		sqlite3_finalize(stmt);
-
-		return fopen(filename.c_str(), "rb");
-	}
-
-	vector<Album> getAllAlbumsSorted(unsigned offset, unsigned size) {
-		sqlite3_stmt *stmt;
-		sqlite3_prepare_v2(sqldb, "SELECT `id`, title, artistid, artist, NULL FROM albums ORDER BY `title` COLLATE NOCASE ASC LIMIT ? OFFSET ?", -1, &stmt, NULL);
-		sqlite3_bind_int64(stmt, 1, size);
-		sqlite3_bind_int64(stmt, 2, offset);
-
-		vector<Album> albums;
-		while (sqlite3_step(stmt) == SQLITE_ROW)
-			albums.push_back(Album(stmt));
-		sqlite3_finalize(stmt);
-
-		return albums;
-	}
-
-	vector<Album> getAlbumsByArtist(string artistid) {
-		sqlite3_stmt *stmt;
-		sqlite3_prepare_v2(sqldb, "SELECT `id`, title, artistid, artist, hascover FROM albums WHERE artistid=? ORDER BY `title` COLLATE NOCASE ASC", -1, &stmt, NULL);
-		sqlite3_bind_text(stmt, 1, artistid.c_str(), -1, NULL);
-
-		vector<Album> albums;
-		while (sqlite3_step(stmt) == SQLITE_ROW)
-			albums.push_back(Album(stmt));
-		sqlite3_finalize(stmt);
-
-		return albums;
-	}
-
-	Album getAlbum(string id) {
-		sqlite3_stmt *stmt;
-		sqlite3_prepare_v2(sqldb, "SELECT `id`, title, artistid, artist, hascover FROM albums WHERE `id`=?", -1, &stmt, NULL);
-		sqlite3_bind_text(stmt, 1, id.c_str(), -1, NULL);
-
-		Album ret;
-		if (sqlite3_step(stmt) == SQLITE_ROW)
-			ret = Album(stmt);
-		sqlite3_finalize(stmt);
-
-		return ret;
-	}
-
-	vector<Artist> getArtists() {
-		sqlite3_stmt *stmt;
-		sqlite3_prepare_v2(sqldb, "SELECT `id`, `name` FROM artists ORDER BY `name` COLLATE NOCASE ASC", -1, &stmt, NULL);
-
-		vector<Artist> artists;
-		while (sqlite3_step(stmt) == SQLITE_ROW)
-			artists.push_back(Artist(stmt));
-		sqlite3_finalize(stmt);
-
-		return artists;
-	}
-
-	vector<Song> getSongsByAlbum(string id) {
-		sqlite3_stmt *stmt;
-		sqlite3_prepare_v2(sqldb, "SELECT `id`, title, albumid, album, artistid, artist,"
-			"trackn, discn, year, duration, bitRate, genre, type FROM songs "
-			"WHERE `albumid`=? ORDER BY trackn, discn ASC", -1, &stmt, NULL);
-
-		sqlite3_bind_text(stmt, 1, id.c_str(), -1, NULL);
-
-		vector<Song> songs;
-		while (sqlite3_step(stmt) == SQLITE_ROW)
-			songs.push_back(Song(stmt));
-		sqlite3_finalize(stmt);
-
-		return songs;
-	}
-
-	vector<Song> getRandomSongs(unsigned limit) {
-		sqlite3_stmt *stmt;
-		sqlite3_prepare_v2(sqldb, "SELECT `id`, title, albumid, album, artistid, artist, "
-			"trackn, discn, year, duration, bitRate, genre, type FROM songs "
-			"LIMIT ? OFFSET ? % ((Select count(*) from songs) - ?)", -1, &stmt, NULL);
-
-		int randoffset = (rand() ^ (rand() << 8) ^ (rand() << 16));
-		sqlite3_bind_int64(stmt, 1, limit);
-		sqlite3_bind_int64(stmt, 2, randoffset);
-		sqlite3_bind_int64(stmt, 3, limit-1);
-
-		vector<Song> songs;
-		while (sqlite3_step(stmt) == SQLITE_ROW)
-			songs.push_back(Song(stmt));
-		sqlite3_finalize(stmt);
-
-		random_shuffle(songs.begin(), songs.end());
-
-		return songs;
-	}
-
-	classTypes classifyId(string id) {
-		sqlite3_stmt *stmt;
-		sqlite3_prepare_v2(sqldb, "SELECT 0 FROM `albums` WHERE `id`=? UNION SELECT 1 FROM `artists` WHERE `id`=?", -1, &stmt, NULL);
-		sqlite3_bind_text(stmt, 1, id.c_str(), -1, NULL);
-		sqlite3_bind_text(stmt, 2, id.c_str(), -1, NULL);
-
-		classTypes ret = TYPE_ERROR;
-		if (sqlite3_step(stmt) == SQLITE_ROW)
-			ret = (classTypes)sqlite3_column_int (stmt, 0);
-		sqlite3_finalize(stmt);
-
-		return ret;
-	}
-
-private:
-	sqlite3 * sqldb;
+	map<string, DataField> attrs;
+	map<string, list<Entity>> content;
 };
 
 static uint64_t fsize(FILE *fd) {
@@ -461,27 +272,26 @@ private:
 	class stream_responder : public fcgi_responder {
 	public:
 		stream_responder(FILE* f, uint64_t offset = 0, uint64_t size = ~0ULL)
-		  : f(f), offset(offset), ret_size(size), header(false) {
+		  : f(f), offset(offset), ret_size(size) {
 			// Seek to offset
 			fseeko(f, offset, SEEK_SET);
 		}
 		~stream_responder() { if (f) fclose(f); }
 
-		virtual std::string respond() {
-			if (!header) {
-				header = true;
-				if (ret_size != ~0ULL || offset > 0)
-					return "Status: 206\r\n"
-						"Content-Type: application/octet-stream\r\n"
-						"Content-Range: bytes " +
-							std::to_string(offset) + "-" + std::to_string(offset + ret_size - 1) + "/*\r\n"
-						"Content-Length: " + std::to_string(ret_size) + "\r\n\r\n";
-				else
-					return "Status: 200\r\n"
-						"Content-Type: application/octet-stream\r\n"
-						"Content-Length: " + std::to_string(ret_size) + "\r\n\r\n";
-			}
+		virtual std::string header() {
+			if (ret_size != ~0ULL || offset > 0)
+				return "Status: 206\r\n"
+					"Content-Type: application/octet-stream\r\n"
+					"Content-Range: bytes " +
+						std::to_string(offset) + "-" + std::to_string(offset + ret_size - 1) + "/*\r\n"
+					"Content-Length: " + std::to_string(ret_size) + "\r\n\r\n";
+			else
+				return "Status: 200\r\n"
+					"Content-Type: application/octet-stream\r\n"
+					"Content-Length: " + std::to_string(ret_size) + "\r\n\r\n";
+		}
 
+		virtual std::string respond() {
 			// Send "small" chunks as response, so we can easily abort if needed.
 			const size_t blocksize = 64*1024;
 			size_t toread = ret_size < blocksize ? ret_size : blocksize;
@@ -500,7 +310,6 @@ private:
 	private:
 		FILE* f;
 		uint64_t offset, ret_size;
-		bool header;
 	};
 
 	bool checkCredentials(web_req& req) {
@@ -521,37 +330,34 @@ private:
 	}
 
 	str_resp* authErr(web_req & req) {
-		bool rjson = (req.vars["f"] == "json");
-		return Entity::error(rjson, 40, "Wrong username or password").respond();
+		RespFmt fmt(req.vars["f"], req.vars["callback"]);
+		return Entity::error(fmt, 40, "Wrong username or password").respond();
 	}
 
 	// Returns Entities, album Name and song count
-	tuple<vector<Entity>, string, unsigned> listSongs(bool rjson,
-		string node, string album_id) {
-
-		Album alb = model->getAlbum(album_id);
-		auto songs = model->getSongsByAlbum(album_id);
-		vector<Entity> esongs;
+	std::list<Entity> listSongs(RespFmt fmt, std::string node, const Album *alb) {
+		auto songs = model->getSongsByAlbum(alb->id);
+		std::list<Entity> esongs;
 		for (auto song: songs) {
-			esongs.push_back(Entity(rjson, node, {
-				{"id",       song.id },
-				{"title",    song.title },
-				{"parent",   song.albumid },
-				{"album",    song.album },
-				{"artist",   song.artist },
-				{"track",    to_string(song.trackn) },
-				{"genre",    song.genre },
-				{"duration", to_string(song.duration) },
-				{"year",     to_string(song.year) },
-				{"discNumber", to_string(song.discn) },
-				{"bitRate",  to_string(song.bitRate) },
-				{"suffix",   song.type },
-				{"contentType", mimetypes[song.type] },
-				{"isDir",   "false" },
-				{"coverArt", (alb.hascover ? album_id : "") }
+			esongs.push_back(Entity(fmt, node, {
+				{"id",       DS(song.sid()) },
+				{"title",    DS(song.title) },
+				{"parent",   DS(song.salbumid()) },
+				{"album",    DS(song.album) },
+				{"artist",   DS(song.artist) },
+				{"track",    DI(song.trackn) },
+				{"genre",    DS(song.genre) },
+				{"duration", DI(song.duration) },
+				{"year",     DI(song.year) },
+				{"discNumber", DI(song.discn) },
+				{"bitRate",  DI(song.bitRate) },
+				{"suffix",   DS(song.type) },
+				{"contentType", DS(mimetypes[song.type]) },
+				{"isDir",    DB(false) },
+				{"coverArt", alb->hascover ? DS(alb->sid()) : DN() }
 			}));
 		}
-		return tuple<vector<Entity>, string, unsigned>(esongs, alb.title, songs.size());
+		return esongs;
 	}
 
 	fcgi_responder* handle(web_req& req, FCGX_Request *fastcgi_req) {
@@ -562,36 +368,37 @@ private:
 		if (!checkCredentials(req))
 			return authErr(req);
 
-		bool rjson = (req.vars["f"] == "json");
+		RespFmt rfmt(req.vars["f"], req.vars["callback"]);
+		uint64_t reqid = hexdecode64(req.vars["id"]);
 
 		if (req.uri == "/rest/getMusicDirectory.view") {
-			vector<Entity> entities;
+			list<Entity> entities;
 			string tname;
-			switch (model->classifyId(req.vars["id"])) {
+			switch (model->classifyId(reqid)) {
 			case TYPE_ALBUM: {
-				auto songs = listSongs(rjson, "child", req.vars["id"]);
-				entities = get<0>(songs);
-				tname = get<1>(songs);
+				Album alb = model->getAlbum(reqid);
+				entities = listSongs(rfmt, "child", &alb);
+				tname = alb.title;
 				} break;
 			case TYPE_ARTIST: {
-				auto albums = model->getAlbumsByArtist(req.vars["id"]);
+				auto albums = model->getAlbumsByArtist(reqid);
 				for (auto album: albums) {
-					entities.push_back(Entity(rjson, "child", {
-						{"id",       album.id },
-						{"title",    album.title },
-						{"artist",   album.artist },
-						{"parent",   album.artistid },
-						{"isDir",   "true" },
-						{"coverArt", (album.hascover ? album.id : "") }
+					entities.push_back(Entity(rfmt, "child", {
+						{"id",       DS(album.sid()) },
+						{"title",    DS(album.title) },
+						{"artist",   DS(album.artist) },
+						{"parent",   DS(album.sartistid()) },
+						{"isDir",    DB(true) },
+						{"coverArt", album.hascover ? DS(album.sid()) : DN() }
 					}));
 					tname = album.artist;
 				}
 				} break;
 			};
 
-			return Entity::wrap(Entity(rjson, "directory", {
-			                    {"id", req.vars["id"]},
-			                    {"name", tname}},
+			return Entity::wrap(Entity(rfmt, "directory", {
+			                    {"id", DS(req.vars["id"])},
+			                    {"name", DS(tname)}},
 			                    entities)).respond();
 		}
 		else if (req.uri == "/rest/getAlbumList.view" or req.uri == "/rest/getAlbumList2.view") {
@@ -603,31 +410,32 @@ private:
 				size   = stoul(req.vars["size"]);
 			} catch (...) {}
 
-			vector<Entity> ealbums;
+			list<Entity> ealbums;
 			auto albums = model->getAllAlbumsSorted(offset, size);
 			for (auto album: albums) {
-				ealbums.push_back(Entity(rjson, "album", {
-					{"id",       album.id},
-					{"title",    album.title},
-					{"artist",   album.artist},
-					{"parent",   album.artistid},
-					{"isDir",   "true"},
-					{"coverArt", album.hascover ? album.id : ""}
+				ealbums.push_back(Entity(rfmt, "album", {
+					{"id",       DS(album.sid())},
+					{"title",    DS(album.title)},
+					{"artist",   DS(album.artist)},
+					{"parent",   DS(album.sartistid())},
+					{"isDir",    DB(true)},
+					{"coverArt", album.hascover ? DS(album.sid()) : DN() }
 				}));
 			}
 
 			string tag = (req.uri == "/rest/getAlbumList2.view") ? "albumList2" : "albumList";
-			return Entity::wrap(Entity(rjson, tag, {}, ealbums)).respond();
+			return Entity::wrap(Entity(rfmt, tag, {}, ealbums)).respond();
 		}
 
 		else if (req.uri == "/rest/getAlbum.view") {
-			auto songs = listSongs(rjson, "song", req.vars["id"]);
-			return Entity::wrap(Entity(rjson, "album", {
-			                    {"id",        req.vars["id"]},
-			                    {"name",      get<1>(songs)},
-			                    {"songCount", to_string(get<2>(songs))},
-			                    {"coverArt",  req.vars["id"]}},
-			                    get<0>(songs))).respond();
+			Album alb = model->getAlbum(reqid);
+			auto songs = listSongs(rfmt, "song", &alb);
+			return Entity::wrap(Entity(rfmt, "album", {
+			                    {"id",        DS(req.vars["id"])},
+			                    {"name",      DS(alb.title)},
+			                    {"songCount", DI(songs.size())},
+			                    {"coverArt",  DS(req.vars["id"])}},
+			                    songs)).respond();
 		}
 
 		else if (req.uri == "/rest/getRandomSongs.view") {
@@ -637,101 +445,115 @@ private:
 			} catch (...) {}
 
 			auto songs = model->getRandomSongs(size);
-			vector<Entity> esongs;
+			list<Entity> esongs;
 			for (auto song: songs) {
-				esongs.push_back(Entity(rjson, "song", {
-					{"id",       song.id },
-					{"title",    song.title },
-					{"parent",   song.albumid },
-					{"album",    song.album },
-					{"artist",   song.artist },
-					{"track",    to_string(song.trackn) },
-					{"genre",    song.genre },
-					{"duration", to_string(song.duration) },
-					{"year",     to_string(song.year) },
-					{"discNumber", to_string(song.discn) },
-					{"bitRate",  to_string(song.bitRate) },
-					{"suffix",   song.type },
-					{"contentType", mimetypes[song.type] },
-					{"isDir",   "false" },
-					{"coverArt", song.albumid },
+				esongs.push_back(Entity(rfmt, "song", {
+					{"id",       DS(song.sid()) },
+					{"title",    DS(song.title) },
+					{"parent",   DS(song.salbumid()) },
+					{"album",    DS(song.album) },
+					{"artist",   DS(song.artist) },
+					{"track",    DI(song.trackn) },
+					{"genre",    DS(song.genre) },
+					{"duration", DI(song.duration) },
+					{"year",     DI(song.year) },
+					{"discNumber", DI(song.discn) },
+					{"bitRate",  DI(song.bitRate) },
+					{"suffix",   DS(song.type) },
+					{"contentType", DS(mimetypes[song.type]) },
+					{"isDir",    DB(false) },
+					{"coverArt", DS(song.salbumid()) },
 				}));
 			}
 
-			return Entity::wrap(Entity(rjson, "randomSongs", {}, esongs)).respond();
+			return Entity::wrap(Entity(rfmt, "randomSongs", {}, esongs)).respond();
 		}
 
 		else if (req.uri == "/rest/getIndexes.view") {
-			vector<Entity> eartists;
+			list<Entity> eartists;
 			for (auto artist: model->getArtists())
-				eartists.push_back(Entity(rjson, "artist", 
-					{ {"id", artist.id}, {"name", artist.name} }));
+				eartists.push_back(Entity(rfmt, "artist", 
+					{ {"id", DS(artist.sid())}, {"name", DS(artist.name)} }));
 
-			return Entity::wrap(Entity(rjson, "indexes", {
-			                    {"lastModified", "1455843830000"},  // FIXME: Unix timestamp * 1000
-			                    {"ignoredArticles", "The El La Los Las Le Les"}},
-			                    vector<Entity>{
-			                    Entity(rjson, "index", {{"name", "Music"}}, eartists)})).respond();
+			return Entity::wrap(Entity(rfmt, "indexes", {
+			                    {"lastModified", DI(1455843830000)},  // FIXME: Unix timestamp * 1000
+			                    {"ignoredArticles", DS("The El La Los Las Le Les")}},
+			                    list<Entity>{
+			                    Entity(rfmt, "index", {{"name", DS("Music")}}, eartists)})).respond();
 		}
-
-		else if (req.uri == "/rest/getCoverArt.view") {
-			std::string img = model->getAlbumCover(req.vars["id"], req.vars["size"]);
-			return new str_resp("Status: 200\r\n"
-				"Content-Type: image/jpeg\r\n"
-				"Content-Length: " + std::to_string(img.size()) + "\r\n\r\n" + img);
+		else if (req.uri == "/rest/getPlaylists.view") {
+			return Entity::wrap(Entity(rfmt, "playlists", {}, {})).respond();
+		}
+		else if (req.uri == "/rest/getGenres.view") {
+			return Entity::wrap(Entity(rfmt, "genres", {}, {})).respond();
+		}
+		else if (req.uri == "/rest/getPodcasts.view") {
+			return Entity::wrap(Entity(rfmt, "podcasts", {}, {})).respond();
 		}
 		else if (req.uri == "/rest/stream.view") {
 			// Lookup song_id and get a file name!
-			string song_id = req.vars["id"];
-			FILE * fd = model->getSongFile(song_id);
+			FILE * fd = model->getSongFile(reqid);
 			if (fd) {
 				  // Easier to count this way, prevent overflow
 				req.lastbyte = std::max(req.lastbyte, req.lastbyte + 1);
 				uint64_t fsz = fsize(fd);
-	            //uint64_t max_filesize = fsize(fd) - req.offset;
-	            if (req.lastbyte > fsz)
+				if (req.lastbyte > fsz)
 					req.lastbyte = fsz;
 
 				if (req.lastbyte > req.offset)
 					return new stream_responder(fd, req.offset, req.lastbyte - req.offset);
+				fclose(fd);
 			}
 		}
 
 		// Misc stuff, needs to be there just to make clients happy :)
 		else if (req.uri == "/rest/getMusicFolders.view") {
-			return Entity::wrap(Entity(rjson, "musicFolders", {}, vector<Entity>{
-			                    Entity(rjson, "musicFolder", {
-			                            {"id", "1"},
-			                            {"name", "Music"},
+			return Entity::wrap(Entity(rfmt, "musicFolders", {}, list<Entity>{
+			                    Entity(rfmt, "musicFolder", {
+			                            {"id", DS("1")},
+			                            {"name", DS("Music")},
 			                    })})).respond();
 		}
 		else if (req.uri == "/rest/getLicense.view") {
-			return Entity::wrap(Entity(rjson, "license", {
-			                    {"valid", "true"},
-			                    {"email", "example@example.com"},
-			                    {"key",   "ABC123DEF"}})).respond();
+			return Entity::wrap(Entity(rfmt, "license", {
+			                    {"valid", DB(true)},
+			                    {"email", DS("example@example.com")},
+			                    {"key",   DS("ABC123DEF")}})).respond();
 		}
 		else if (req.uri == "/rest/ping.view") {
-			return Entity::wrap(rjson).respond();
+			return Entity::wrap(rfmt).respond();
 		}
 		else if (req.uri == "/rest/getUser.view") {
-			return Entity::wrap(Entity(rjson, "user", {
-			                    {"username",     "admin"},
-			                    {"email",        "admin@example.com"},
-			                    {"scrobblingEnabled", "true"},
-			                    {"adminRole",    "true"},
-			                    {"settingsRole", "true"},
-			                    {"downloadRole", "true"},
-			                    {"uploadRole",   "false"},
-			                    {"playlistRole", "true"},
-			                    {"coverArtRole", "true"},
-			                    {"commentRole",  "false"},
-			                    {"podcastRole",  "false"},
-			                    {"streamRole",   "false"},
-			                    {"jukeboxRole",  "false"},
-			                    {"shareRole",    "false"},
+			return Entity::wrap(Entity(rfmt, "user", {
+			                    {"username",     DS("admin")},
+			                    {"email",        DS("admin@example.com")},
+			                    {"scrobblingEnabled", DB(true)},
+			                    {"adminRole",    DB(true)},
+			                    {"settingsRole", DB(true)},
+			                    {"downloadRole", DB(true)},
+			                    {"uploadRole",   DB(false)},
+			                    {"playlistRole", DB(true)},
+			                    {"coverArtRole", DB(true)},
+			                    {"commentRole",  DB(false)},
+			                    {"podcastRole",  DB(false)},
+			                    {"streamRole",   DB(false)},
+			                    {"jukeboxRole",  DB(false)},
+			                    {"shareRole",    DB(false)},
 			                    })).respond();
 		}
+		else if (req.uri == "/rest/getCoverArt.view") {
+			auto albumid = reqid;
+			if (model->classifyId(albumid) == TYPE_SONG) {
+				auto song = model->getSong(albumid);
+				if (song)
+					albumid = song->albumid;
+			}
+			std::string img = model->getAlbumCover(albumid, req.vars["size"]);
+			return new str_resp("Status: 200\r\n"
+				"Content-Type: image/jpeg\r\n"
+				"Content-Length: " + std::to_string(img.size()) + "\r\n\r\n", img);
+		}
+
 
 		return respond_not_found();
 	}
@@ -765,7 +587,8 @@ public:
 			std::unique_ptr<fcgi_responder> resp(this->handle(wreq, req.get()));
 
 			// Respond with an immediate update JSON encoded too
-			while (1) {
+			obuf << resp->header();  // Send header
+			while (wreq.method != "HEAD") {
 				std::string r = resp->respond();
 				// Stop if EOF or there was a write error (pipe broken most likely)
 				if (r.empty() || FCGX_GetError(req->out))
