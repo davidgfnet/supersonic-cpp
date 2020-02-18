@@ -1,4 +1,7 @@
 
+#ifndef _CQUEUE__H__
+#define _CQUEUE__H__
+
 #include <atomic>
 #include <mutex>
 #include <list>
@@ -43,4 +46,5 @@ private:
 	std::atomic<bool> nowriter;      // Indicates no more writes will happen
 };
 
+#endif
 

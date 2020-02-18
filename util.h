@@ -1,4 +1,6 @@
 
+#ifndef __UTIL_HDR_H__
+#define __UTIL_HDR_H__
 
 #include <stdint.h>
 #include <string>
@@ -16,4 +18,6 @@ std::string urldec(const std::string &s);
 
 // Escapes strings (for XML and JSON)
 std::string cescape(std::string content, bool isxml = false);
+
+#endif
 
