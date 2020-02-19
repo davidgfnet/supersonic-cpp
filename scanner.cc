@@ -27,6 +27,7 @@
 #include <taglib/attachedpictureframe.h>
 #include <taglib/flacpicture.h>
 
+#include "util.h"
 #include "cqueue.h"
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -108,47 +109,6 @@ uint64_t calcId(string s, classTypes ctype) {
 	return (((uint64_t)ctype) << 60) | (hash & ((1ULL << 60) - 1));
 }
 
-string base64Decode(const string & input) {
-	if (input.length() % 4)
-		return "";
-
-	//Setup a vector to hold the result
-	string ret;
-	unsigned int temp = 0;
-	for (unsigned cursor = 0; cursor < input.size(); ) {
-		for (unsigned i = 0; i < 4; i++) {
-			unsigned char c = *(unsigned char*)&input[cursor];
-			temp <<= 6;
-			if       (c >= 0x41 && c <= 0x5A)
-				temp |= c - 0x41;
-			else if  (c >= 0x61 && c <= 0x7A)
-				temp |= c - 0x47;
-			else if  (c >= 0x30 && c <= 0x39)
-				temp |= c + 0x04;
-			else if  (c == 0x2B)
-				temp |= 0x3E;
-			else if  (c == 0x2F)
-				temp |= 0x3F;
-			else if  (c == '=') {
-				if (input.size() - cursor == 1) {
-					ret.push_back((temp >> 16) & 0x000000FF);
-					ret.push_back((temp >> 8 ) & 0x000000FF);
-					return ret;
-				}
-				else if (input.size() - cursor == 2) {
-					ret.push_back((temp >> 10) & 0x000000FF);
-					return ret;
-				}
-			}
-			cursor++;
-		}
-		ret.push_back((temp >> 16) & 0x000000FF);
-		ret.push_back((temp >> 8 ) & 0x000000FF);
-		ret.push_back((temp      ) & 0x000000FF);
-	}
-	return ret;
-}
-
 void insert_artist(sqlite3 * sqldb, string artist) {
 	sqlite3_stmt *stmt;
 	sqlite3_prepare_v2(sqldb, "INSERT OR REPLACE INTO `artists` (`id`, `name`) VALUES (?,?);", -1, &stmt, NULL);
@@ -168,16 +128,15 @@ std::set<uint64_t> processed_albums;
 std::mutex albummutex;
 
 void insert_album(sqlite3 * sqldb, string album, string artist, string cover) {
-	// Check for album existance first, since this is now expensive
+	// Check if some other worker is already working/worked in this album.
+	// This is to avoid processing covers more than once (expensive!)
 	uint64_t albumid = calcId(album + "@" + artist, TYPE_ALBUM);
-	{
+	if (!cover.empty()) {
 		std::lock_guard<std::mutex> g(albummutex);
 		if (processed_albums.count(albumid))
 			return;
 		processed_albums.insert(albumid);
 	}
-
-	// Add the album already with all the info we have (but covers!)
 
 	// Create several versions of this cover, so we can serve different sizes
 	const unsigned sizes[4] = {128, 256, 512, 1024};

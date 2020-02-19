@@ -4,12 +4,9 @@
 #include <string>
 #include <iostream>
 #include <list>
-#include <vector>
 #include <thread>
 #include <memory>
 #include <unordered_map>
-#include <map>
-#include <sqlite3.h>
 #include <fcgio.h>
 #include <unistd.h>
 #include <signal.h>
@@ -17,234 +14,18 @@
 #include "util.h"
 #include "queue.h"
 #include "datamodel.h"
+#include "fcgihelper.h"
+#include "resphelper.h"
 
-using namespace std;
+#define getone(m, k, def) \
+	((m).find(k) == (m).end() ? def : (m).find(k)->second)
 
-typedef std::unordered_map<std::string, std::string> StrMap;
-map<string, string> mimetypes = { {"mp3", "audio/mpeg"}, {"ogg", "audio/ogg"} };
-enum fmtType { TYPE_XML, TYPE_JSON, TYPE_JSONP };
-enum datType { DATA_STR, DATA_INT, DATA_BOOL, DATA_NULL };
+std::unordered_map<std::string, std::string> mimetypes = { {"mp3", "audio/mpeg"}, {"ogg", "audio/ogg"} };
 
 struct web_req {
 	uint64_t offset, lastbyte;
 	std::string method, host, uri;
-	StrMap vars;
-};
-
-struct DataField {
-	datType type;
-	std::string str;
-	long long integer;
-	bool boolean;
-
-	bool null() const { return type == DATA_NULL; }
-	std::string tostr(bool isxml) const {
-		switch (type) {
-		case DATA_STR:
-			return "\"" + cescape(str, isxml) + "\"";
-		case DATA_INT:
-			if (isxml)
-				return "\"" + std::to_string(integer) + "\"";
-			return std::to_string(integer);
-		case DATA_BOOL:
-			if (isxml)
-				return "\"" + std::string(boolean ? "true" : "false") + "\"";
-			return boolean ? "true" : "false";
-		};
-		return {};
-	}
-};
-
-#define DS(x) DataField{.type = DATA_STR, .str = (x), .integer = 0, .boolean = false}
-#define DI(x) DataField{.type = DATA_INT, .str = "", .integer = (long long)(x), .boolean = false}
-#define DB(x) DataField{.type = DATA_BOOL, .str = "", .integer = 0, .boolean = (x)}
-#define DN()  DataField{.type = DATA_NULL, .str = "", .integer = 0, .boolean = false}
-
-class RespFmt {
-public:
-	RespFmt(std::string fmt_str, std::string extended) : extended(extended) {
-		if (fmt_str == "json")
-			fmt = TYPE_JSON;
-		else if (fmt_str == "jsonp")
-			fmt = TYPE_JSONP;
-		else
-			fmt = TYPE_XML;
-	}
-	bool isjson() const { return fmt != TYPE_XML; }
-	std::string mime() const {
-		const char *types[] = {
-			"text/xml",
-			"application/json",
-			"application/javascript"
-		};
-		return types[fmt];
-	}
-	std::string wrap(std::string c) {
-		switch (fmt) {
-		case TYPE_JSON:
-			return "{" + c + "}";
-		case TYPE_JSONP:
-			return extended + "({" + c + "});";
-		default:
-			return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" + c;
-		};
-	}
-
-	fmtType fmt;
-	std::string extended;
-};
-
-class fcgi_responder {
-public:
-	virtual std::string header() = 0;
-	virtual std::string respond() = 0;
-};
-
-class str_resp : public fcgi_responder {
-public:
-	str_resp(std::string h, std::string b) : head(h), body(b) {}
-	virtual std::string header() {
-		return head;
-	}
-	virtual std::string respond() {
-		// Responds once!
-		std::string r = body;
-		body.clear();
-		return r;
-	}
-private:
-	std::string head, body;
-};
-
-str_resp *respond_not_found() {
-	return new str_resp(
-		"Status: 404\r\n"
-		"Content-Type: text/plain\r\n"
-		"Content-Length: 13\r\n\r\n", "URI not found");
-}
-
-str_resp *respond_method_not_allowed() {
-	return new str_resp(
-		"Status: 405\r\n"
-		"Content-Type: text/plain\r\n"
-		"Content-Length: 18\r\n\r\n", "Method not allowed");
-}
-
-static std::unordered_map<std::string, std::string> parse_vars(std::string body) {
-	std::unordered_map<std::string, std::string> vars;
-	size_t p = 0;
-	while (1) {
-		size_t pe = body.find('&', p);
-		std::string curv = pe != std::string::npos ? body.substr(p, pe - p) : body.substr(p);
-		size_t peq = curv.find('=');
-		if (peq != std::string::npos)
-			vars[urldec(curv.substr(0, peq))] = urldec(curv.substr(peq+1));
-		if (pe == std::string::npos)
-			break;
-		p = pe + 1;
-	}
-
-	return vars;
-}
-
-static std::pair<uint64_t, uint64_t> parse_range(std::string h) {
-	// h is like bytes=X-Y (we ignore other formats)
-	if (h.size() < 8 || h.substr(0, 6) != "bytes=")
-		return {0, ~0ULL};
-
-	h = h.substr(6);
-	uint64_t startoff = atoll(h.c_str());
-
-	auto p = h.find('-');
-	if (p == std::string::npos)
-		return {0, ~0ULL};
-
-	uint64_t csize = atoll(&h[p+1]);
-	if (h.size() <= p+1)
-		csize = ~0ULL;
-
-	return {startoff, csize};
-}
-
-class Entity {
-public:
-	Entity(RespFmt rfmt, string name, map<string, DataField> attrs, list<Entity> cvec = {})
-	 : rfmt(rfmt), vrep(true), name(name), attrs(attrs) {
-		for (auto c: cvec)
-			content[c.name].push_back(c);
-	}
-
-	Entity(RespFmt rfmt, string name, map<string, DataField> attrs, Entity e)
-	 : rfmt(rfmt), vrep(false), name(name), attrs(attrs) {
-		content[e.name].push_back(e);
-	}
-
-	string to_string() const {
-		if (rfmt.isjson())
-			return "\"" + name + "\": " + this->content_string();
-		else
-			return this->content_string();
-	}
-
-	string content_string() const {
-		if (rfmt.isjson()) {
-			string c;
-			for (const auto it: attrs)
-				if (!it.second.null())
-					c += "\"" + it.first + "\": " + it.second.tostr(false) + ",\n";
-			for (const auto it: content) {
-				if (vrep) {
-					c += "\"" + cescape(it.first) + "\": [\n";
-					for (const auto e: it.second)
-						c += e.content_string() + ",\n";
-					c = c.substr(0, c.size()-2);
-					c += "],\n";
-				} else {
-					c += it.second.front().to_string() + "\n";
-				}
-			}
-			if (attrs.size() || content.size())
-				c = c.substr(0, c.size()-2);
-			return "{\n" + c + "}\n";
-		}else{
-			string a, c;
-			for (const auto it: attrs)
-				if (!it.second.null())
-					a += " " + it.first + "=" + it.second.tostr(true) + "";
-			for (const auto it: content)
-				for (const auto e: it.second)
-					c += e.to_string();
-			return "<" + name + a + ">\n" + c + "</" + name + ">\n";
-		}
-	}
-	str_resp* respond() {
-		std::string rtype = rfmt.mime();
-		std::string c = rfmt.wrap(this->to_string());
-		return new str_resp("Status: 200\r\n"
-			"Content-Type: " + rtype + "\r\n"
-			"Content-Length: " + std::to_string(c.size()) + "\r\n\r\n", c);
-	}
-
-
-	static Entity wrap(Entity e) {
-		return Entity(e.rfmt, "subsonic-response",
-		              {{"status", DS("ok")}, {"version", DS("1.9.0")}}, e);
-	}
-	static Entity wrap(RespFmt fmt) {
-		return Entity(fmt, "subsonic-response",
-		              {{"status", DS("ok")}, {"version", DS("1.9.0")}});
-	}
-	static Entity error(RespFmt fmt, unsigned code, string content) {
-		return Entity(fmt, "subsonic-response",
-		              {{"status", DS("failed")}, {"version", DS("1.9.0")}},
-		              Entity(fmt, "error", {{"code", DI(code)}, {"message", DS(content)}}));
-	}
-
-	RespFmt rfmt;
-	bool vrep;
-	string name;
-	map<string, DataField> attrs;
-	map<string, list<Entity>> content;
+	std::unordered_multimap<std::string, std::string> vars;
 };
 
 static uint64_t fsize(FILE *fd) {
@@ -312,24 +93,26 @@ private:
 	};
 
 	bool checkCredentials(web_req& req) {
-		string user = req.vars["u"];
+		std::string user = getone(req.vars, "u", "");
 		if (user.empty())
 			return false;
 
-		if (!req.vars["p"].empty()) {
-			string pass = req.vars["p"];
+		std::string pass = getone(req.vars, "p", "");
+		if (!pass.empty()) {
 			if (pass.substr(0, 4) == "enc:")
 				pass = hexdecode(pass.substr(4));
 			return model->checkCredentials(user, pass);
 		}
-		if (!req.vars["s"].empty() && !req.vars["t"].empty()) {
-			return model->checkCredentialsMD5(user, req.vars["t"], req.vars["s"]);
-		}
+
+		auto saltit = req.vars.find("s");
+		auto toknit = req.vars.find("t");
+		if (saltit != req.vars.end() && toknit != req.vars.end())
+			return model->checkCredentialsMD5(user, toknit->second, saltit->second);
 		return false;
 	}
 
 	str_resp* authErr(web_req & req) {
-		RespFmt fmt(req.vars["f"], req.vars["callback"]);
+		RespFmt fmt(getone(req.vars, "f", ""), getone(req.vars, "callback", ""));
 		return Entity::error(fmt, 40, "Wrong username or password").respond();
 	}
 
@@ -367,12 +150,12 @@ private:
 		if (!checkCredentials(req))
 			return authErr(req);
 
-		RespFmt rfmt(req.vars["f"], req.vars["callback"]);
-		uint64_t reqid = hexdecode64(req.vars["id"]);
+		RespFmt rfmt(getone(req.vars, "f", ""), getone(req.vars, "callback", ""));
+		uint64_t reqid = hexdecode64(getone(req.vars, "id", ""));
 
 		if (req.uri == "/rest/getMusicDirectory.view") {
-			list<Entity> entities;
-			string tname;
+			std::list<Entity> entities;
+			std::string tname;
 			switch (model->classifyId(reqid)) {
 			case TYPE_ALBUM: {
 				Album alb = model->getAlbum(reqid);
@@ -396,20 +179,16 @@ private:
 			};
 
 			return Entity::wrap(Entity(rfmt, "directory", {
-			                    {"id", DS(req.vars["id"])},
+			                    {"id",   DS(std::to_string(reqid))},
 			                    {"name", DS(tname)}},
 			                    entities)).respond();
 		}
-		else if (req.uri == "/rest/getAlbumList.view" or req.uri == "/rest/getAlbumList2.view") {
-			unsigned offset = 0, size = 50;
-			try {
-				offset = stoul(req.vars["offset"]);
-			} catch (...) {}
-			try {
-				size   = stoul(req.vars["size"]);
-			} catch (...) {}
+		else if (req.uri == "/rest/getAlbumList.view" or
+		         req.uri == "/rest/getAlbumList2.view") {
+			unsigned offset = atoi(getone(req.vars, "offset", "").c_str());
+			unsigned size = req.vars.count("size") ? atoi(getone(req.vars, "size", "").c_str()) : 10;
 
-			list<Entity> ealbums;
+			std::list<Entity> ealbums;
 			auto albums = model->getAllAlbumsSorted(offset, size);
 			for (auto album: albums) {
 				ealbums.push_back(Entity(rfmt, "album", {
@@ -422,7 +201,7 @@ private:
 				}));
 			}
 
-			string tag = (req.uri == "/rest/getAlbumList2.view") ? "albumList2" : "albumList";
+			std::string tag = (req.uri == "/rest/getAlbumList2.view") ? "albumList2" : "albumList";
 			return Entity::wrap(Entity(rfmt, tag, {}, ealbums)).respond();
 		}
 
@@ -430,21 +209,18 @@ private:
 			Album alb = model->getAlbum(reqid);
 			auto songs = listSongs(rfmt, "song", &alb);
 			return Entity::wrap(Entity(rfmt, "album", {
-			                    {"id",        DS(req.vars["id"])},
+			                    {"id",        DS(std::to_string(reqid))},
 			                    {"name",      DS(alb.title)},
 			                    {"songCount", DI(songs.size())},
-			                    {"coverArt",  DS(req.vars["id"])}},
+			                    {"coverArt",  DS(std::to_string(reqid))}},
 			                    songs)).respond();
 		}
 
 		else if (req.uri == "/rest/getRandomSongs.view") {
-			unsigned size = 10;
-			try {
-				size = stoul(req.vars["size"]);
-			} catch (...) {}
+			unsigned size = req.vars.count("size") ? atoi(getone(req.vars, "size", "").c_str()) : 10;
 
 			auto songs = model->getRandomSongs(size);
-			list<Entity> esongs;
+			std::list<Entity> esongs;
 			for (auto song: songs) {
 				esongs.push_back(Entity(rfmt, "song", {
 					{"id",       DS(song.sid()) },
@@ -469,7 +245,7 @@ private:
 		}
 
 		else if (req.uri == "/rest/getIndexes.view") {
-			list<Entity> eartists;
+			std::list<Entity> eartists;
 			for (auto artist: model->getArtists())
 				eartists.push_back(Entity(rfmt, "artist", 
 					{ {"id", DS(artist.sid())}, {"name", DS(artist.name)} }));
@@ -477,19 +253,11 @@ private:
 			return Entity::wrap(Entity(rfmt, "indexes", {
 			                    {"lastModified", DI(1455843830000)},  // FIXME: Unix timestamp * 1000
 			                    {"ignoredArticles", DS("The El La Los Las Le Les")}},
-			                    list<Entity>{
+					    std::list<Entity>{
 			                    Entity(rfmt, "index", {{"name", DS("Music")}}, eartists)})).respond();
 		}
-		else if (req.uri == "/rest/getPlaylists.view") {
-			return Entity::wrap(Entity(rfmt, "playlists", {}, {})).respond();
-		}
-		else if (req.uri == "/rest/getGenres.view") {
-			return Entity::wrap(Entity(rfmt, "genres", {}, {})).respond();
-		}
-		else if (req.uri == "/rest/getPodcasts.view") {
-			return Entity::wrap(Entity(rfmt, "podcasts", {}, {})).respond();
-		}
-		else if (req.uri == "/rest/stream.view") {
+		else if (req.uri == "/rest/stream.view" or
+		         req.uri == "/rest/download.view") {
 			// Lookup song_id and get a file name!
 			FILE * fd = model->getSongFile(reqid);
 			if (fd) {
@@ -507,7 +275,7 @@ private:
 
 		// Misc stuff, needs to be there just to make clients happy :)
 		else if (req.uri == "/rest/getMusicFolders.view") {
-			return Entity::wrap(Entity(rfmt, "musicFolders", {}, list<Entity>{
+			return Entity::wrap(Entity(rfmt, "musicFolders", {}, std::list<Entity>{
 			                    Entity(rfmt, "musicFolder", {
 			                            {"id", DS("1")},
 			                            {"name", DS("Music")},
@@ -529,15 +297,16 @@ private:
 			                    {"scrobblingEnabled", DB(true)},
 			                    {"adminRole",    DB(true)},
 			                    {"settingsRole", DB(true)},
+			                    {"streamRole",   DB(true)},
+			                    {"jukeboxRole",  DB(false)},
 			                    {"downloadRole", DB(true)},
 			                    {"uploadRole",   DB(false)},
 			                    {"playlistRole", DB(true)},
-			                    {"coverArtRole", DB(true)},
+			                    {"coverArtRole", DB(false)},
 			                    {"commentRole",  DB(false)},
 			                    {"podcastRole",  DB(false)},
-			                    {"streamRole",   DB(false)},
-			                    {"jukeboxRole",  DB(false)},
 			                    {"shareRole",    DB(false)},
+			                    {"videoConversionRole", DB(false)},
 			                    })).respond();
 		}
 		else if (req.uri == "/rest/getCoverArt.view") {
@@ -547,12 +316,53 @@ private:
 				if (song)
 					albumid = song->albumid;
 			}
-			std::string img = model->getAlbumCover(albumid, req.vars["size"]);
+			unsigned size = atoi(getone(req.vars, "size", "").c_str());
+			std::string img = model->getAlbumCover(albumid, size);
 			return new str_resp("Status: 200\r\n"
 				"Content-Type: image/jpeg\r\n"
 				"Content-Length: " + std::to_string(img.size()) + "\r\n\r\n", img);
 		}
+		// Playlist management
+		// getPlaylists getPlaylist createPlaylist updatePlaylist deletePlaylist 
 
+		// All the unsupported features, like podcasts & video calls are mocked out here.
+		// Denies permissions to all updates and returns empty yet valid responses to all queries
+		else if (req.uri == "/rest/getPlaylists.view")
+			return Entity::wrap(Entity(rfmt, "playlists", {}, {})).respond();
+		else if (req.uri == "/rest/getGenres.view")
+			return Entity::wrap(Entity(rfmt, "genres", {}, {})).respond();
+		else if (req.uri == "/rest/getPodcasts.view")
+			return Entity::wrap(Entity(rfmt, "podcasts", {}, {})).respond();
+		else if (req.uri == "/rest/getNewestPodcasts.view")
+			return Entity::wrap(Entity(rfmt, "newestPodcasts", {}, {})).respond();
+		else if (req.uri == "/rest/getInternetRadioStations.view")
+			return Entity::wrap(Entity(rfmt, "internetRadioStations", {}, {})).respond();
+		else if (req.uri == "/rest/getShares.view")
+			return Entity::wrap(Entity(rfmt, "shares", {}, {})).respond();
+		else if (req.uri == "/rest/getLyrics.view")
+			return Entity::wrap(Entity(rfmt, "lyrics", {}, {})).respond();
+		else if (req.uri == "/rest/getChatMessages.view")
+			return Entity::wrap(Entity(rfmt, "chatMessages", {}, {})).respond();
+		else if (req.uri == "/rest/refreshPodcasts.view" or
+		         req.uri == "/rest/createPodcastChannel.view" or
+		         req.uri == "/rest/deletePodcastChannel.view" or
+		         req.uri == "/rest/deletePodcastEpisode.view" or
+		         req.uri == "/rest/downloadPodcastEpisode.view" or
+		         req.uri == "/rest/createInternetRadioStation.view" or
+		         req.uri == "/rest/updateInternetRadioStation.view" or
+		         req.uri == "/rest/deleteInternetRadioStation.view" or
+		         req.uri == "/rest/createShare.view" or
+		         req.uri == "/rest/updateShare.view" or
+		         req.uri == "/rest/deleteShare.view" or
+		         req.uri == "/rest/addChatMessage.view" or
+		         req.uri == "/rest/createUser.view" or
+		         req.uri == "/rest/updateUser.view" or
+		         req.uri == "/rest/deleteUser.view" or
+		         req.uri == "/rest/changePassword.view" or
+		         req.uri == "/rest/jukeboxControl.view")
+			return Entity::error(rfmt, 50, "Permission denined").respond();
+		else if (req.uri == "/rest/getVideos.view")
+			return Entity::wrap(Entity(rfmt, "videos", {}, {})).respond();
 
 		return respond_not_found();
 	}

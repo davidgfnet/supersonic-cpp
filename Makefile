@@ -2,7 +2,7 @@
 CXXFLAGS ?= -O2 -ggdb
 CXXFLAGS += -std=c++11
 SERVER_OBJS=supersonic.cc util.cc
-CLIENT_OBJS=scanner.cc
+CLIENT_OBJS=scanner.cc util.cc
 
 all:	supersonic-server supersonic-scanner
 

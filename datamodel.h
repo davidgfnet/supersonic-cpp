@@ -1,5 +1,14 @@
 
+#ifndef __DATA_MODEL__HH__
+#define __DATA_MODEL__HH__
+
 // Data model for the database. Represents Artists, Songs and Albums.
+
+#include <string>
+#include <list>
+#include <vector>
+#include <string>
+#include <sqlite3.h>
 
 enum classTypes { TYPE_ALBUM = 0, TYPE_ARTIST = 1, TYPE_SONG = 2, TYPE_ERROR = 3 };
 
@@ -89,12 +98,11 @@ public:
 		return false;
 	}
 
-	std::string getAlbumCover(uint64_t id, std::string ssize) {
-		unsigned size = atoi(ssize.c_str());
+	std::string getAlbumCover(uint64_t id, unsigned size) {
 		const std::vector<std::string> fields = {
 			"cover128", "cover256", "cover512", "cover1024", "cover"
 		};
-		unsigned off = (size > 1024) ? 4:
+		unsigned off = (size > 1024 || !size) ? 4:
 		               (size >  512) ? 3:
 		               (size >  256) ? 2:
 		               (size >  128) ? 1:0;
@@ -129,7 +137,9 @@ public:
 
 	std::list<Album> getAllAlbumsSorted(unsigned offset, unsigned size) {
 		sqlite3_stmt *stmt;
-		sqlite3_prepare_v2(sqldb, "SELECT `id`, title, artistid, artist, hascover FROM albums ORDER BY `title` COLLATE NOCASE ASC LIMIT ? OFFSET ?", -1, &stmt, NULL);
+		sqlite3_prepare_v2(sqldb, "SELECT `id`, title, artistid, artist, hascover "
+		                          "FROM albums ORDER BY `title` COLLATE NOCASE ASC "
+		                          "LIMIT ? OFFSET ?", -1, &stmt, NULL);
 		sqlite3_bind_int64(stmt, 1, size);
 		sqlite3_bind_int64(stmt, 2, offset);
 
@@ -143,7 +153,9 @@ public:
 
 	std::list<Album> getAlbumsByArtist(uint64_t artistid) {
 		sqlite3_stmt *stmt;
-		sqlite3_prepare_v2(sqldb, "SELECT `id`, title, artistid, artist, hascover FROM albums WHERE artistid=? ORDER BY `title` COLLATE NOCASE ASC", -1, &stmt, NULL);
+		sqlite3_prepare_v2(sqldb, "SELECT `id`, title, artistid, artist, hascover "
+		                          "FROM albums WHERE artistid=? ORDER BY `title` "
+		                          "COLLATE NOCASE ASC", -1, &stmt, NULL);
 		sqlite3_bind_int64(stmt, 1, artistid);
 
 		std::list<Album> albums;
@@ -156,7 +168,8 @@ public:
 
 	Album getAlbum(uint64_t id) {
 		sqlite3_stmt *stmt;
-		sqlite3_prepare_v2(sqldb, "SELECT `id`, title, artistid, artist, hascover FROM albums WHERE `id`=?", -1, &stmt, NULL);
+		sqlite3_prepare_v2(sqldb, "SELECT `id`, title, artistid, artist, hascover "
+		                          "FROM albums WHERE `id`=?", -1, &stmt, NULL);
 		sqlite3_bind_int64(stmt, 1, id);
 
 		Album ret;
@@ -235,4 +248,6 @@ public:
 private:
 	sqlite3 * sqldb;
 };
+
+#endif
 
