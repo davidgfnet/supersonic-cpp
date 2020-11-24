@@ -10,6 +10,9 @@
 #include <string>
 #include <sqlite3.h>
 
+#include "util.h"
+#include "resphelper.h"
+
 enum classTypes { TYPE_ALBUM = 0, TYPE_ARTIST = 1, TYPE_SONG = 2, TYPE_ERROR = 3 };
 
 class IdObj {
@@ -70,6 +73,26 @@ public:
 
 	std::string sartistid() const { return hexencode64(artistid); }
 	std::string salbumid()  const { return hexencode64(albumid); }
+
+	std::unordered_map<std::string, DataField> getAttrs() const {
+		return {
+			{"id",       DS(sid()) },
+			{"title",    DS(title) },
+			{"parent",   DS(salbumid()) },
+			{"album",    DS(album) },
+			{"artist",   DS(artist) },
+			{"track",    DI(trackn) },
+			{"genre",    DS(genre) },
+			{"duration", DI(duration) },
+			{"year",     DI(year) },
+			{"discNumber", DI(discn) },
+			{"bitRate",  DI(bitRate) },
+			{"suffix",   DS(type) },
+			{"contentType", DS(mimetypes[type]) },
+			{"isDir",    DB(false) },
+			{"coverArt", DS(salbumid()) },
+		};
+	}
 };
 
 class DataModel {
@@ -122,7 +145,7 @@ public:
 		return ret;
 	}
 
-	FILE * getSongFile(uint64_t id) {
+	std::string getSongFile(uint64_t id) {
 		std::string filename;
 		sqlite3_stmt *stmt;
 		sqlite3_prepare_v2(sqldb, "SELECT filename FROM songs WHERE id=?", -1, &stmt, NULL);
@@ -132,7 +155,7 @@ public:
 		}
 		sqlite3_finalize(stmt);
 
-		return fopen(filename.c_str(), "rb");
+		return filename;
 	}
 
 	std::list<Album> getAllAlbumsSorted(unsigned offset, unsigned size) {

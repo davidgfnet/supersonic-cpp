@@ -11,16 +11,17 @@
 #include <unistd.h>
 #include <signal.h>
 
+#include "argparse/argparse.hpp"
 #include "util.h"
 #include "queue.h"
 #include "datamodel.h"
+#include "userdata.h"
 #include "fcgihelper.h"
 #include "resphelper.h"
 
 #define getone(m, k, def) \
 	((m).find(k) == (m).end() ? def : (m).find(k)->second)
 
-std::unordered_map<std::string, std::string> mimetypes = { {"mp3", "audio/mpeg"}, {"ogg", "audio/ogg"} };
 
 struct web_req {
 	uint64_t offset, lastbyte;
@@ -40,11 +41,17 @@ private:
 	// Datamodel
 	DataModel *model;
 
+	// And user data DB
+	UserData *udata;
+
 	// Thread to spawn
 	std::thread cthread;
 
 	// Shared queue
 	ConcurrentQueue<std::unique_ptr<FCGX_Request>> *rq;
+
+	// Search directories
+	std::vector<std::string> sdirs;
 
 	// Signal end of workers
 	bool end;
@@ -92,8 +99,7 @@ private:
 		uint64_t offset, ret_size;
 	};
 
-	bool checkCredentials(web_req& req) {
-		std::string user = getone(req.vars, "u", "");
+	bool checkCredentials(std::string user, web_req& req) {
 		if (user.empty())
 			return false;
 
@@ -120,25 +126,8 @@ private:
 	std::list<Entity> listSongs(RespFmt fmt, std::string node, const Album *alb) {
 		auto songs = model->getSongsByAlbum(alb->id);
 		std::list<Entity> esongs;
-		for (auto song: songs) {
-			esongs.push_back(Entity(fmt, node, {
-				{"id",       DS(song.sid()) },
-				{"title",    DS(song.title) },
-				{"parent",   DS(song.salbumid()) },
-				{"album",    DS(song.album) },
-				{"artist",   DS(song.artist) },
-				{"track",    DI(song.trackn) },
-				{"genre",    DS(song.genre) },
-				{"duration", DI(song.duration) },
-				{"year",     DI(song.year) },
-				{"discNumber", DI(song.discn) },
-				{"bitRate",  DI(song.bitRate) },
-				{"suffix",   DS(song.type) },
-				{"contentType", DS(mimetypes[song.type]) },
-				{"isDir",    DB(false) },
-				{"coverArt", alb->hascover ? DS(alb->sid()) : DN() }
-			}));
-		}
+		for (auto song: songs)
+			esongs.push_back(Entity(fmt, node, song.getAttrs()));
 		return esongs;
 	}
 
@@ -146,8 +135,10 @@ private:
 		if (req.method != "HEAD" && req.method != "GET" && req.method != "POST")
 			return respond_method_not_allowed();
 
+		std::string user = getone(req.vars, "u", "");
+
 		// Check for auth user and kick out intruders
-		if (!checkCredentials(req))
+		if (!checkCredentials(user, req))
 			return authErr(req);
 
 		RespFmt rfmt(getone(req.vars, "f", ""), getone(req.vars, "callback", ""));
@@ -221,25 +212,8 @@ private:
 
 			auto songs = model->getRandomSongs(size);
 			std::list<Entity> esongs;
-			for (auto song: songs) {
-				esongs.push_back(Entity(rfmt, "song", {
-					{"id",       DS(song.sid()) },
-					{"title",    DS(song.title) },
-					{"parent",   DS(song.salbumid()) },
-					{"album",    DS(song.album) },
-					{"artist",   DS(song.artist) },
-					{"track",    DI(song.trackn) },
-					{"genre",    DS(song.genre) },
-					{"duration", DI(song.duration) },
-					{"year",     DI(song.year) },
-					{"discNumber", DI(song.discn) },
-					{"bitRate",  DI(song.bitRate) },
-					{"suffix",   DS(song.type) },
-					{"contentType", DS(mimetypes[song.type]) },
-					{"isDir",    DB(false) },
-					{"coverArt", DS(song.salbumid()) },
-				}));
-			}
+			for (auto song: songs)
+				esongs.push_back(Entity(rfmt, "song", song.getAttrs()));
 
 			return Entity::wrap(Entity(rfmt, "randomSongs", {}, esongs)).respond();
 		}
@@ -259,17 +233,32 @@ private:
 		else if (req.uri == "/rest/stream.view" or
 		         req.uri == "/rest/download.view") {
 			// Lookup song_id and get a file name!
-			FILE * fd = model->getSongFile(reqid);
-			if (fd) {
-				  // Easier to count this way, prevent overflow
-				req.lastbyte = std::max(req.lastbyte, req.lastbyte + 1);
-				uint64_t fsz = fsize(fd);
-				if (req.lastbyte > fsz)
-					req.lastbyte = fsz;
+			std::string fname = model->getSongFile(reqid);
+			if (!fname.empty()) {
+				FILE *fd = NULL;
+				if (fname[0] == '/')
+					// Use absolute path as is
+					fd = fopen(fname.c_str(), "rb");
+				else {
+					// Try to open the file using all the search paths
+					for (const auto & dir : sdirs) {
+						fd = fopen((dir + "/" + fname).c_str(), "rb");
+						if (fd)
+							break;
+					}
+				}
+				// Stream the data to the user if found
+				if (fd) {
+					// Easier to count this way, prevent overflow
+					req.lastbyte = std::max(req.lastbyte, req.lastbyte + 1);
+					uint64_t fsz = fsize(fd);
+					if (req.lastbyte > fsz)
+						req.lastbyte = fsz;
 
-				if (req.lastbyte > req.offset)
-					return new stream_responder(fd, req.offset, req.lastbyte - req.offset);
-				fclose(fd);
+					if (req.lastbyte > req.offset)
+						return new stream_responder(fd, req.offset, req.lastbyte - req.offset);
+					fclose(fd);
+				}
 			}
 		}
 
@@ -324,6 +313,43 @@ private:
 		}
 		// Playlist management
 		// getPlaylists getPlaylist createPlaylist updatePlaylist deletePlaylist 
+		else if (req.uri == "/rest/getPlaylist.view") {
+			auto pl = udata->getPlaylist(reqid);
+			if (pl) {
+				if (pl->upublic || pl->username == user) {
+					std::list<Entity> esongs;
+					for (auto songid : pl->songs) {
+						auto song = model->getSong(songid);
+						esongs.push_back(Entity(rfmt, "entry", song->getAttrs()));
+					}
+					return Entity::wrap(Entity(rfmt, "playlist", {
+					                    {"id",        DS(std::to_string(reqid))},
+					                    {"name",      DS(pl->name)},
+					                    {"comment",   DS(pl->comment)},
+					                    {"owner",     DS(pl->username)},
+					                    {"public",    DB(pl->upublic)},
+					                    {"songCount", DI(pl->songs.size())}},
+					                    esongs)).respond();
+				}
+				else
+					return Entity::error(rfmt, 50, "Permission denied").respond();
+			}
+			else
+				return Entity::error(rfmt, 70, "Playlist not found").respond();
+		}
+		else if (req.uri == "/rest/getPlaylists.view") {
+			std::list<Entity> eplaylists;
+			for (const auto & pl : udata->getPlaylists(user)) {
+				eplaylists.push_back(Entity::wrap(Entity(rfmt, "playlist", {
+				                    {"id",        DS(std::to_string(reqid))},
+				                    {"name",      DS(pl.name)},
+				                    {"comment",   DS(pl.comment)},
+				                    {"owner",     DS(pl.username)},
+				                    {"public",    DB(pl.upublic)},
+				                    {"songCount", DI(pl.songs.size())}})));
+			}
+			return Entity::wrap(Entity(rfmt, "playlists", {}, eplaylists)).respond();
+		}
 
 		// All the unsupported features, like podcasts & video calls are mocked out here.
 		// Denies permissions to all updates and returns empty yet valid responses to all queries
@@ -360,7 +386,7 @@ private:
 		         req.uri == "/rest/deleteUser.view" or
 		         req.uri == "/rest/changePassword.view" or
 		         req.uri == "/rest/jukeboxControl.view")
-			return Entity::error(rfmt, 50, "Permission denined").respond();
+			return Entity::error(rfmt, 50, "Permission denied").respond();
 		else if (req.uri == "/rest/getVideos.view")
 			return Entity::wrap(Entity(rfmt, "videos", {}, {})).respond();
 
@@ -368,8 +394,10 @@ private:
 	}
 
 public:
-	SupersonicServer(DataModel *dbm, ConcurrentQueue<std::unique_ptr<FCGX_Request>> *rq)
-	: model(dbm), rq(rq) {
+	SupersonicServer(DataModel *dbm, UserData *udata,
+	                 ConcurrentQueue<std::unique_ptr<FCGX_Request>> *rq,
+	                 std::vector<std::string> sdirs)
+	: model(dbm), udata(udata), rq(rq), sdirs(sdirs) {
 		cthread = std::thread(&SupersonicServer::work, this);
 	}
 
@@ -423,17 +451,46 @@ void sighandler(int) {
 }
 
 int main(int argc, char **argv) {
-	if (argc < 2) {
-		std::cerr << "Usage: " << argv[0] << " database [nthreads]" << std::endl;
-		return 1;
-	}
+	ArgumentParser parser;
+	parser.addArgument("-m", "--musicdb", 1, false);
+	parser.addArgument("-u", "--userdb",  1, true);
+	parser.addArgument("-t", "--threads", 1, true);
+	parser.addArgument("-d", "--search-dir", '*');
+	parser.parse(argc, (const char **)argv);
 
 	// Initialize the database backend.
 	sqlite3* sqldb;
-	if (SQLITE_OK != sqlite3_open_v2(argv[1], &sqldb, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, NULL)) {
-		std::cerr << "Could not open sqlite3 database!" << std::endl;
+	if (SQLITE_OK != sqlite3_open_v2(parser.retrieve<std::string>("m").c_str(), &sqldb,
+	                                 SQLITE_OPEN_READONLY |
+	                                 SQLITE_OPEN_FULLMUTEX, NULL)) {
+		std::cerr << "Could not open sqlite3 music database!" << std::endl;
 		return 1;
 	}
+
+	// Database to store user data, such as playlists. This is really optional.
+	sqlite3* userdb;
+	if (parser.count("u")) {
+		if (SQLITE_OK != sqlite3_open_v2(parser.retrieve<std::string>("u").c_str(), &userdb,
+		                                 SQLITE_OPEN_READWRITE |
+		                                 SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, NULL)) {
+			std::cerr << "Could not open sqlite3 user database!" << std::endl;
+			return 1;
+		}
+	} else {
+		if (SQLITE_OK != sqlite3_open_v2("userdb", &userdb, SQLITE_OPEN_READWRITE |
+		                                 SQLITE_OPEN_MEMORY | SQLITE_OPEN_FULLMUTEX, NULL)) {
+			std::cerr << "Could not open a temporary (in-mem) sqlite3 user database!" << std::endl;
+			return 1;
+		}
+		std::cerr << "WARNING: Using an in-memory database for user data, all data will be lost "
+		             "on restart. If you want to use persistent storage use '--userdb'" << std::endl;
+	}
+	UserData udata(userdb);
+
+	// Use the search dirs to retrieve the music files
+	auto sdirs = parser.retrieve<std::vector<std::string>>("d");
+	if (sdirs.empty())
+		sdirs.push_back("/");     // Assuming aboslute paths in the database
 
 	// Start FastCGI interface
 	FCGX_Init();
@@ -444,13 +501,12 @@ int main(int argc, char **argv) {
 	signal(SIGPIPE, SIG_IGN);
 
 	// Start worker threads for this
-	unsigned nthreads = (argc >= 3) ? (atoi(argv[2]) & 255) : 4;
-
+	unsigned nthreads = parser.count("t") ? atoi(parser.retrieve<std::string>("t").c_str()) : 4;
 	DataModel dbm(sqldb);
 	ConcurrentQueue<std::unique_ptr<FCGX_Request>> reqqueue;
 	SupersonicServer *workers[nthreads];
 	for (unsigned i = 0; i < nthreads; i++)
-		workers[i] = new SupersonicServer(&dbm, &reqqueue);
+		workers[i] = new SupersonicServer(&dbm, &udata, &reqqueue, sdirs);
 
 	std::cerr << "All workers up, serving until SIGINT/SIGTERM" << std::endl;
 
@@ -472,7 +528,7 @@ int main(int argc, char **argv) {
 	for (unsigned i = 0; i < nthreads; i++)
 		delete workers[i];
 
-	std::cerr << "All clear, service is down" << std::endl;
+	std::cerr << "All clear, service is down, flushing databases ..." << std::endl;
 	sqlite3_close(sqldb);
 }
 

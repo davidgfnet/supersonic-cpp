@@ -10,6 +10,7 @@
 
 class fcgi_responder {
 public:
+	virtual ~fcgi_responder() {}
 	virtual std::string header() = 0;
 	virtual std::string respond() = 0;
 };

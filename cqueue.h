@@ -9,7 +9,7 @@
 template<typename T>
 class ConcurrentQueue {
 public:
-	ConcurrentQueue(unsigned max_size) : max_size(max_size), nowriter(false) {}
+	ConcurrentQueue(unsigned max_size) : max_size_(max_size), nowriter(false) {}
 
 	void close() {
 		std::unique_lock<std::mutex> lock(mutex_);
@@ -19,10 +19,11 @@ public:
 
 	void push(T item) {
 		std::unique_lock<std::mutex> lock(mutex_);
-		while (q.size() >= max_size)
+		while (q.size() >= max_size_)
 			writevar.wait(lock);
 
 		q.push_back(std::move(item));
+		queued_++;
 		lock.unlock();
 		readvar.notify_one();
 	}
@@ -43,10 +44,25 @@ public:
 		return false;
 	}
 
+	std::size_t queued() const {
+		std::unique_lock<std::mutex> lock(mutex_);
+		return queued_;
+	}
+
+	std::size_t size() const {
+		std::unique_lock<std::mutex> lock(mutex_);
+		return q.size();
+	}
+
+	std::size_t closed() const {
+		std::unique_lock<std::mutex> lock(mutex_);
+		return nowriter;
+	}
+
 private:
-	unsigned max_size;
+	unsigned max_size_, queued_;
 	std::list<T> q;     // list of items
-	std::mutex mutex_;  // protection mutex
+	mutable std::mutex mutex_;  // protection mutex
 	std::condition_variable readvar, writevar; // Wait variables
 	std::atomic<bool> nowriter;      // Indicates no more writes will happen
 };

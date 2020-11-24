@@ -9,6 +9,8 @@
 
 #include "fcgihelper.h"
 
+static std::unordered_map<std::string, std::string> mimetypes = {{"mp3", "audio/mpeg"}, {"ogg", "audio/ogg"} };
+
 enum fmtType { TYPE_XML, TYPE_JSON, TYPE_JSONP };
 enum datType { DATA_STR, DATA_INT, DATA_BOOL, DATA_NULL };
 

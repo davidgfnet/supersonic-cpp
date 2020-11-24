@@ -5,7 +5,6 @@
 #include <vector>
 #include <thread>
 #include <algorithm>
-#include <map>
 #include <set>
 #include <string.h>
 #include <unistd.h>
@@ -75,6 +74,7 @@ const char * init_sql = "\
 		`genre`	TEXT,\
 		`type`	TEXT,\
 		`filename`	TEXT,\
+		`timestamp`	INTEGER,\
 		PRIMARY KEY(id)\
 	);\
 	CREATE TABLE `users` (\
@@ -97,15 +97,7 @@ uint64_t calcId(string s, classTypes ctype) {
 	uint8_t h[SHA256_DIGEST_LENGTH];
 	SHA256((uint8_t*)s.c_str(), s.size(), h);
 
-	uint64_t hash =
-		((uint64_t)h[0] <<  0) | 
-		((uint64_t)h[1] <<  8) | 
-		((uint64_t)h[2] << 16) | 
-		((uint64_t)h[3] << 24) | 
-		((uint64_t)h[4] << 32) | 
-		((uint64_t)h[5] << 40) | 
-		((uint64_t)h[6] << 48) | 
-		((uint64_t)h[7] << 56);
+	uint64_t hash = a2i64(h);
 	return (((uint64_t)ctype) << 60) | (hash & ((1ULL << 60) - 1));
 }
 
@@ -187,14 +179,14 @@ void insert_album(sqlite3 * sqldb, string album, string artist, string cover) {
 	sqlite3_finalize(stmt);
 }
 
-void insert_song(sqlite3 * sqldb, string filename, string title, string artist, string album,
-	string type, string genre, unsigned tn, unsigned year, unsigned discn, unsigned duration, unsigned bitrate) {
+void insert_song(sqlite3 * sqldb, string filename, string title, string artist, string album, string type, string genre,
+                 unsigned tn, unsigned year, unsigned discn, unsigned duration, unsigned bitrate, uint64_t timestamp) {
 
 	sqlite3_stmt *stmt;
 	sqlite3_prepare_v2(sqldb, "INSERT OR REPLACE INTO `songs` "
-		"(`id`, `title`, `albumid`, `album`, `artistid`, `artist`,"
-		" `type`, `genre`, `trackn`, `year`, `discn`, `duration`, `bitRate`, `filename`)"
-		" VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?);", -1, &stmt, NULL);
+		"(`id`, `title`, `albumid`, `album`, `artistid`, `artist`, `type`, "
+		"`genre`, `trackn`, `year`, `discn`, `duration`, `bitRate`, `filename`, `timestamp`)"
+		" VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);", -1, &stmt, NULL);
 
 	sqlite3_bind_int64(stmt, 1, calcId(to_string(tn) + "@" + to_string(discn) + "@" + title + "@" + album + "@" + artist, TYPE_SONG));
 	sqlite3_bind_text (stmt, 2, title.c_str(), -1, NULL);
@@ -210,6 +202,7 @@ void insert_song(sqlite3 * sqldb, string filename, string title, string artist, 
 	sqlite3_bind_int  (stmt,12, duration);
 	sqlite3_bind_int  (stmt,13, bitrate);
 	sqlite3_bind_text (stmt,14, filename.c_str(), -1, NULL);
+	sqlite3_bind_int64(stmt,15, timestamp);
 
 	if (sqlite3_step(stmt) != SQLITE_DONE) {
 		cout << "Err " << filename << endl;
@@ -224,6 +217,21 @@ void scan_music_file(sqlite3 * sqldb, string fullpath) {
 	std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
 	if (ext != "mp3" && ext != "ogg")
+		return;
+
+	// Do not process the file if it has (presumably) not changed
+	struct stat attrs;
+	stat(fullpath.c_str(), &attrs);
+
+	sqlite3_stmt *stmt;
+	sqlite3_prepare_v2(sqldb, "SELECT timestamp FROM songs WHERE filename == ? AND timestamp == ?",
+	                   -1, &stmt, NULL);
+	sqlite3_bind_text (stmt, 1, fullpath.c_str(), -1, NULL);
+	sqlite3_bind_int64(stmt, 2, attrs.st_mtime);
+	bool nochanges = (sqlite3_step(stmt) == SQLITE_ROW);
+	sqlite3_finalize(stmt);
+
+	if (nochanges)
 		return;
 
 	TagLib::FileRef f(fullpath.c_str());
@@ -300,7 +308,7 @@ void scan_music_file(sqlite3 * sqldb, string fullpath) {
 
 	insert_song(sqldb, fullpath, tag->title().toCString(true), albumartist,
 		tag->album().toCString(true), ext, tag->genre().toCString(true),
-		tag->track(), tag->year(), discn, properties->length(), properties->bitrate());
+		tag->track(), tag->year(), discn, properties->length(), properties->bitrate(), attrs.st_mtime);
 
 	insert_album(sqldb, tag->album().toCString(true), albumartist, cover);
 	insert_artist(sqldb, albumartist);
@@ -325,7 +333,6 @@ void scan_fs(string name, ConcurrentQueue<std::string> *fileq) {
 			scan_fs(fullpath, fileq);
 		}
 		else
-			//scan_music_file(sqldb, fullpath);
 			fileq->push(fullpath);
 	} while ((entry = readdir(dir)));
 	closedir(dir);
@@ -337,6 +344,13 @@ void scan_worker(sqlite3 * sqldb, ConcurrentQueue<std::string> *fileq) {
 		scan_music_file(sqldb, filename);
 }
 
+void status_thread(ConcurrentQueue<std::string> *fileq) {
+	while (!fileq->closed()) {
+		std::cout << (fileq->queued() - fileq->size()) << "/" << fileq->queued() << "      \r";
+		std::cout.flush();
+		sleep(1);
+	}
+}
 
 int main(int argc, char* argv[]) {
 	if (argc < 3) {
@@ -370,10 +384,11 @@ int main(int argc, char* argv[]) {
 		sqlite3_exec(sqldb, init_sql, NULL, NULL, NULL);
 
 		// Start scanning and adding stuff to the database
-		ConcurrentQueue<std::string> fileq(32);
+		ConcurrentQueue<std::string> fileq(1024);
 		std::vector<std::thread> tpool;
 		for (unsigned i = 0; i < nthreads; i++)
 			tpool.emplace_back(scan_worker, sqldb, &fileq);
+		tpool.emplace_back(status_thread, &fileq);
 		scan_fs(musicdir, &fileq);
 		fileq.close();
 		for (auto & t : tpool)
