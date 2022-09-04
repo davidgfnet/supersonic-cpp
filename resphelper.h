@@ -141,7 +141,7 @@ public:
 		std::string c = rfmt.wrap(this->to_string());
 		return new str_resp("Status: 200\r\n"
 			"Content-Type: " + rtype + "\r\n"
-			"Content-Length: " + std::to_string(c.size()) + "\r\n\r\n", c);
+			"Content-Length: " + std::to_string(c.size()) + "\r\n", c);
 	}
 
 

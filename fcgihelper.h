@@ -35,14 +35,14 @@ static str_resp *respond_not_found() {
 	return new str_resp(
 		"Status: 404\r\n"
 		"Content-Type: text/plain\r\n"
-		"Content-Length: 13\r\n\r\n", "URI not found");
+		"Content-Length: 13\r\n", "URI not found");
 }
 
 static str_resp *respond_method_not_allowed() {
 	return new str_resp(
 		"Status: 405\r\n"
 		"Content-Type: text/plain\r\n"
-		"Content-Length: 18\r\n\r\n", "Method not allowed");
+		"Content-Length: 18\r\n", "Method not allowed");
 }
 
 #endif

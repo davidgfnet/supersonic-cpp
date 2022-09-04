@@ -53,6 +53,9 @@ private:
 	// Search directories
 	std::vector<std::string> sdirs;
 
+	// CORS origin (if any)
+	std::string cors_origin;
+
 	// Signal end of workers
 	bool end;
 
@@ -71,11 +74,11 @@ private:
 					"Content-Type: application/octet-stream\r\n"
 					"Content-Range: bytes " +
 						std::to_string(offset) + "-" + std::to_string(offset + ret_size - 1) + "/*\r\n"
-					"Content-Length: " + std::to_string(ret_size) + "\r\n\r\n";
+					"Content-Length: " + std::to_string(ret_size) + "\r\n";
 			else
 				return "Status: 200\r\n"
 					"Content-Type: application/octet-stream\r\n"
-					"Content-Length: " + std::to_string(ret_size) + "\r\n\r\n";
+					"Content-Length: " + std::to_string(ret_size) + "\r\n";
 		}
 
 		virtual std::string respond() {
@@ -309,7 +312,7 @@ private:
 			std::string img = model->getAlbumCover(albumid, size);
 			return new str_resp("Status: 200\r\n"
 				"Content-Type: image/jpeg\r\n"
-				"Content-Length: " + std::to_string(img.size()) + "\r\n\r\n", img);
+				"Content-Length: " + std::to_string(img.size()) + "\r\n", img);
 		}
 		// Playlist management
 		// getPlaylists getPlaylist createPlaylist updatePlaylist deletePlaylist 
@@ -396,8 +399,8 @@ private:
 public:
 	SupersonicServer(DataModel *dbm, UserData *udata,
 	                 ConcurrentQueue<std::unique_ptr<FCGX_Request>> *rq,
-	                 std::vector<std::string> sdirs)
-	: model(dbm), udata(udata), rq(rq), sdirs(sdirs) {
+	                 std::vector<std::string> sdirs, std::string cors_origin)
+	: model(dbm), udata(udata), rq(rq), sdirs(sdirs), cors_origin(cors_origin) {
 		cthread = std::thread(&SupersonicServer::work, this);
 	}
 
@@ -425,6 +428,9 @@ public:
 
 			// Respond with an immediate update JSON encoded too
 			obuf << resp->header();  // Send header
+			if (!cors_origin.empty())
+				obuf << "Access-Control-Allow-Origin: " + cors_origin + "\r\n";
+			obuf << "\r\n";
 			while (wreq.method != "HEAD") {
 				std::string r = resp->respond();
 				// Stop if EOF or there was a write error (pipe broken most likely)
@@ -456,6 +462,7 @@ int main(int argc, char **argv) {
 	parser.addArgument("-u", "--userdb",  1, true);
 	parser.addArgument("-t", "--threads", 1, true);
 	parser.addArgument("-d", "--search-dir", '*');
+	parser.addArgument("-c", "--access-control-origin", 1, true);
 	parser.parse(argc, (const char **)argv);
 
 	// Initialize the database backend.
@@ -487,6 +494,10 @@ int main(int argc, char **argv) {
 	}
 	UserData udata(userdb);
 
+	std::string cors_origin;
+	if (parser.count("c"))
+		cors_origin = parser.retrieve<std::string>("c");
+
 	// Use the search dirs to retrieve the music files
 	auto sdirs = parser.retrieve<std::vector<std::string>>("d");
 	if (sdirs.empty())
@@ -506,7 +517,7 @@ int main(int argc, char **argv) {
 	ConcurrentQueue<std::unique_ptr<FCGX_Request>> reqqueue;
 	SupersonicServer *workers[nthreads];
 	for (unsigned i = 0; i < nthreads; i++)
-		workers[i] = new SupersonicServer(&dbm, &udata, &reqqueue, sdirs);
+		workers[i] = new SupersonicServer(&dbm, &udata, &reqqueue, sdirs, cors_origin);
 
 	std::cerr << "All workers up, serving until SIGINT/SIGTERM" << std::endl;
 
