@@ -198,6 +198,21 @@ private:
 			std::string tag = (req.uri == "/rest/getAlbumList2.view") ? "albumList2" : "albumList";
 			return Entity::wrap(Entity(rfmt, tag, {}, ealbums)).respond();
 		}
+		else if (req.uri == "/rest/getArtist.view") {
+			std::list<Entity> ealbums;
+			auto albums = model->getAlbumsByArtist(reqid);
+			for (auto album: albums) {
+				ealbums.push_back(Entity(rfmt, "album", {
+					{"id",       DS(album.sid())},
+					{"name",     DS(album.title)},
+					{"artist",   DS(album.artist)},
+					{"artistid", DS(album.sartistid()) },
+					{"coverArt", album.hascover ? DS(album.sid()) : DN() }
+				}));
+			}
+
+			return Entity::wrap(Entity(rfmt, "artist", {{"albumCount", DI(albums.size())}}, ealbums)).respond();
+		}
 
 		else if (req.uri == "/rest/getAlbum.view") {
 			Album alb = model->getAlbum(reqid);
@@ -205,8 +220,11 @@ private:
 			return Entity::wrap(Entity(rfmt, "album", {
 			                    {"id",        DS(std::to_string(reqid))},
 			                    {"name",      DS(alb.title)},
+			                    {"type",      DS("music")},
 			                    {"songCount", DI(songs.size())},
-			                    {"coverArt",  DS(std::to_string(reqid))}},
+			                    {"coverArt",  DS(std::to_string(reqid))},
+			                    {"artist",    DS(alb.artist)},
+			                    {"artistId",  DS(alb.sartistid())}},
 			                    songs)).respond();
 		}
 
@@ -220,7 +238,17 @@ private:
 
 			return Entity::wrap(Entity(rfmt, "randomSongs", {}, esongs)).respond();
 		}
+		else if (req.uri == "/rest/getArtists.view") {
+			std::list<Entity> eartists;
+			for (auto artist: model->getArtists())
+				eartists.push_back(Entity(rfmt, "artist",
+					{ {"id", DS(artist.sid())}, {"name", DS(artist.name)} }));
 
+			return Entity::wrap(Entity(rfmt, "artists", {
+			                    {"ignoredArticles", DS("The El La Los Las Le Les")}},
+					    std::list<Entity>{
+			                    Entity(rfmt, "index", {{"name", DS("Music")}}, eartists)})).respond();
+		}
 		else if (req.uri == "/rest/getIndexes.view") {
 			std::list<Entity> eartists;
 			for (auto artist: model->getArtists())
