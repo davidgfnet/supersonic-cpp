@@ -145,7 +145,8 @@ private:
 			return authErr(req);
 
 		RespFmt rfmt(getone(req.vars, "f", ""), getone(req.vars, "callback", ""));
-		uint64_t reqid = hexdecode64(getone(req.vars, "id", ""));
+		std::string sreqid = getone(req.vars, "id", "");
+		uint64_t reqid = hexdecode64(sreqid);
 
 		if (req.uri == "/rest/getMusicDirectory.view") {
 			std::list<Entity> entities;
@@ -218,11 +219,11 @@ private:
 			Album alb = model->getAlbum(reqid);
 			auto songs = listSongs(rfmt, "song", &alb);
 			return Entity::wrap(Entity(rfmt, "album", {
-			                    {"id",        DS(std::to_string(reqid))},
+			                    {"id",        DS(sreqid)},
 			                    {"name",      DS(alb.title)},
 			                    {"type",      DS("music")},
 			                    {"songCount", DI(songs.size())},
-			                    {"coverArt",  DS(std::to_string(reqid))},
+			                    {"coverArt",  DS(sreqid)},
 			                    {"artist",    DS(alb.artist)},
 			                    {"artistId",  DS(alb.sartistid())}},
 			                    songs)).respond();
