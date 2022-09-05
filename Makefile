@@ -11,7 +11,7 @@ supersonic-scanner:	$(CLIENT_OBJS)
 	g++ $(CXXFLAGS) -o supersonic-scanner $(CLIENT_OBJS) -lsqlite3 -ltag -lcrypto -lpthread
 
 supersonic-server:	$(SERVER_OBJS)
-	g++ $(CXXFLAGS) -o supersonic-server $(SERVER_OBJS) -lsqlite3 -lfcgi++ -lfcgi -lpthread
+	g++ $(CXXFLAGS) -o supersonic-server $(SERVER_OBJS) -lsqlite3 -lfcgi++ -lcrypto -lfcgi -lpthread
 
 clean:
 	rm -f supersonic-scanner supersonic-server

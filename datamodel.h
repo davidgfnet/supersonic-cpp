@@ -4,11 +4,12 @@
 
 // Data model for the database. Represents Artists, Songs and Albums.
 
-#include <string>
+#include <cstring>
 #include <list>
 #include <vector>
 #include <string>
 #include <sqlite3.h>
+#include <openssl/md5.h>
 
 #include "util.h"
 #include "resphelper.h"
@@ -112,12 +113,20 @@ public:
 	}
 
 	bool checkCredentialsMD5(std::string user, std::string token, std::string salt) {
+		if (token.size() != 32)
+			return false;
+
 		sqlite3_stmt *stmt;
-		sqlite3_prepare_v2(sqldb, "SELECT * FROM users WHERE username=?", -1, &stmt, NULL);
+		sqlite3_prepare_v2(sqldb, "SELECT password FROM users WHERE username=?", -1, &stmt, NULL);
 		sqlite3_bind_text(stmt, 1, user.c_str(), -1, NULL);
 		if (sqlite3_step(stmt) == SQLITE_ROW) {
 			// Query pass and get MD5, compare
-			return false;
+			uint8_t h[MD5_DIGEST_LENGTH];
+			std::string ndgst = std::string((char*)sqlite3_column_text(stmt, 0)) + salt;
+			MD5((uint8_t*)ndgst.c_str(), ndgst.size(), h);
+			std::string dectoken = hexdecode(token);
+
+			return !memcmp(dectoken.c_str(), h, MD5_DIGEST_LENGTH);
 		}
 		sqlite3_finalize(stmt);
 		return false;
