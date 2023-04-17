@@ -49,7 +49,7 @@ public:
 
 class Song : public IdObj {
 public:
-	uint64_t albumid, artistid;
+	uint64_t albumid, artistid, filesize;
 	std::string title, album, artist;
 	unsigned trackn, duration, year, discn, bitRate;
 	std::string genre, type;
@@ -67,9 +67,10 @@ public:
 		year     = sqlite3_column_int(stmt, 8);
 		duration = sqlite3_column_int(stmt, 9);
 		bitRate  = sqlite3_column_int(stmt,10);
+		filesize = sqlite3_column_int(stmt,11);
 
-		genre    = std::string((char*)sqlite3_column_text (stmt,11));
-		type     = std::string((char*)sqlite3_column_text (stmt,12));
+		genre    = std::string((char*)sqlite3_column_text (stmt, 12));
+		type     = std::string((char*)sqlite3_column_text (stmt, 13));
 	}
 
 	std::string sartistid() const { return hexencode64(artistid); }
@@ -91,6 +92,8 @@ public:
 			{"discNumber", DI(discn) },
 			{"bitRate",  DI(bitRate) },
 			{"suffix",   DS(type) },
+			{"type",     DS("music") },
+			{"size",     DI(filesize) },
 			{"contentType", DS(mimetypes[type]) },
 			{"isDir",    DB(false) },
 			{"coverArt", DS(salbumid()) },
@@ -229,7 +232,7 @@ public:
 	std::unique_ptr<Song> getSong(uint64_t id) {
 		sqlite3_stmt *stmt;
 		sqlite3_prepare_v2(sqldb, "SELECT `id`, title, albumid, album, artistid, artist,"
-			"trackn, discn, year, duration, bitRate, genre, type FROM songs "
+			"trackn, discn, year, duration, bitRate, filesize, genre, type FROM songs "
 			"WHERE `id`=?", -1, &stmt, NULL);
 		sqlite3_bind_int64(stmt, 1, id);
 
@@ -244,7 +247,7 @@ public:
 	std::list<Song> getSongsByAlbum(uint64_t id) {
 		sqlite3_stmt *stmt;
 		sqlite3_prepare_v2(sqldb, "SELECT `id`, title, albumid, album, artistid, artist,"
-			"trackn, discn, year, duration, bitRate, genre, type FROM songs "
+			"trackn, discn, year, duration, bitRate, filesize, genre, type FROM songs "
 			"WHERE `albumid`=? ORDER BY trackn, discn ASC", -1, &stmt, NULL);
 
 		sqlite3_bind_int64(stmt, 1, id);
@@ -260,7 +263,7 @@ public:
 	std::list<Song> getRandomSongs(unsigned limit) {
 		sqlite3_stmt *stmt;
 		sqlite3_prepare_v2(sqldb, "SELECT `id`, title, albumid, album, artistid, artist, "
-			"trackn, discn, year, duration, bitRate, genre, type FROM songs "
+			"trackn, discn, year, duration, bitRate, filesize, genre, type FROM songs "
 			"ORDER BY random() LIMIT ?", -1, &stmt, NULL);
 		sqlite3_bind_int64(stmt, 1, limit);
 

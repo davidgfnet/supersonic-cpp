@@ -75,6 +75,7 @@ const char * init_sql = "\
 		`type`	TEXT,\
 		`filename`	TEXT,\
 		`timestamp`	INTEGER,\
+		`filesize`	INTEGER,\
 		PRIMARY KEY(id)\
 	);\
 	CREATE TABLE `users` (\
@@ -179,14 +180,16 @@ void insert_album(sqlite3 * sqldb, string album, string artist, string cover) {
 	sqlite3_finalize(stmt);
 }
 
-void insert_song(sqlite3 * sqldb, string filename, string title, string artist, string album, string type, string genre,
-                 unsigned tn, unsigned year, unsigned discn, unsigned duration, unsigned bitrate, uint64_t timestamp) {
+void insert_song(sqlite3 * sqldb, string filename, string title,
+                 string artist, string album, string type, string genre,
+                 unsigned tn, unsigned year, unsigned discn, unsigned duration,
+                 unsigned bitrate, uint64_t timestamp, uint64_t filesize) {
 
 	sqlite3_stmt *stmt;
 	sqlite3_prepare_v2(sqldb, "INSERT OR REPLACE INTO `songs` "
-		"(`id`, `title`, `albumid`, `album`, `artistid`, `artist`, `type`, "
-		"`genre`, `trackn`, `year`, `discn`, `duration`, `bitRate`, `filename`, `timestamp`)"
-		" VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);", -1, &stmt, NULL);
+		"(`id`, `title`, `albumid`, `album`, `artistid`, `artist`, `type`, `genre`, "
+		"`trackn`, `year`, `discn`, `duration`, `bitRate`, `filename`, `timestamp`, `filesize`)"
+		" VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);", -1, &stmt, NULL);
 
 	sqlite3_bind_int64(stmt, 1, calcId(to_string(tn) + "@" + to_string(discn) + "@" + title + "@" + album + "@" + artist, TYPE_SONG));
 	sqlite3_bind_text (stmt, 2, title.c_str(), -1, NULL);
@@ -203,6 +206,7 @@ void insert_song(sqlite3 * sqldb, string filename, string title, string artist, 
 	sqlite3_bind_int  (stmt,13, bitrate);
 	sqlite3_bind_text (stmt,14, filename.c_str(), -1, NULL);
 	sqlite3_bind_int64(stmt,15, timestamp);
+	sqlite3_bind_int64(stmt,16, filesize);
 
 	if (sqlite3_step(stmt) != SQLITE_DONE) {
 		cout << "Err " << filename << endl;
@@ -224,10 +228,11 @@ void scan_music_file(sqlite3 * sqldb, string fullpath) {
 	stat(fullpath.c_str(), &attrs);
 
 	sqlite3_stmt *stmt;
-	sqlite3_prepare_v2(sqldb, "SELECT timestamp FROM songs WHERE filename == ? AND timestamp == ?",
+	sqlite3_prepare_v2(sqldb, "SELECT timestamp FROM songs WHERE filename == ? AND timestamp == ? AND filesize == ?",
 	                   -1, &stmt, NULL);
 	sqlite3_bind_text (stmt, 1, fullpath.c_str(), -1, NULL);
 	sqlite3_bind_int64(stmt, 2, attrs.st_mtime);
+	sqlite3_bind_int64(stmt, 3, attrs.st_size);
 	bool nochanges = (sqlite3_step(stmt) == SQLITE_ROW);
 	sqlite3_finalize(stmt);
 
@@ -308,7 +313,8 @@ void scan_music_file(sqlite3 * sqldb, string fullpath) {
 
 	insert_song(sqldb, fullpath, tag->title().toCString(true), albumartist,
 		tag->album().toCString(true), ext, tag->genre().toCString(true),
-		tag->track(), tag->year(), discn, properties->length(), properties->bitrate(), attrs.st_mtime);
+		tag->track(), tag->year(), discn, properties->length(), properties->bitrate(),
+		attrs.st_mtime, attrs.st_size);
 
 	insert_album(sqldb, tag->album().toCString(true), albumartist, cover);
 	insert_artist(sqldb, albumartist);
