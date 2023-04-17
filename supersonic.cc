@@ -189,6 +189,7 @@ private:
 				ealbums.push_back(Entity(rfmt, "album", {
 					{"id",       DS(album.sid())},
 					{"title",    DS(album.title)},
+					{"name",     DS(album.title)},
 					{"artist",   DS(album.artist)},
 					{"parent",   DS(album.sartistid())},
 					{"isDir",    DB(true)},
