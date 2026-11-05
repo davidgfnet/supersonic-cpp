@@ -382,6 +382,12 @@ int main(int argc, char* argv[]) {
 		NULL
 	);
 	panic_if(ok != SQLITE_OK, "Could not open sqlite3 database!");
+
+	// The database holds plaintext passwords, do not leave it world-accessible
+	struct stat dbstat;
+	panic_if(stat(dbpath.c_str(), &dbstat), "Could not stat sqlite3 database!");
+	if (dbstat.st_mode & S_IRWXO)
+		panic_if(chmod(dbpath.c_str(), dbstat.st_mode & 0770), "Could not chmod sqlite3 database!");
 	sqlite3_exec(sqldb, "PRAGMA synchronous = OFF", NULL, NULL, NULL);
 
 	if (action == "scan") {
