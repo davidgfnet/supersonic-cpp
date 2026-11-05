@@ -268,8 +268,9 @@ void scan_music_file(sqlite3 * sqldb, string fullpath) {
 		if (mp3_tag) {
 			auto frames = mp3_tag->frameList("APIC");
 			if (!frames.isEmpty()) {
-				auto frame = static_cast<TagLib::ID3v2::AttachedPictureFrame *>(frames.front());
-				cover = string(frame->picture().data(), frame->picture().size());
+				auto frame = dynamic_cast<TagLib::ID3v2::AttachedPictureFrame *>(frames.front());
+				if (frame)
+					cover = string(frame->picture().data(), frame->picture().size());
 			}
 			if (mp3_tag->properties().contains("ALBUMARTIST"))
 				albumartist = mp3_tag->properties()["ALBUMARTIST"][0].toCString(true);
