@@ -416,6 +416,17 @@ int main(int argc, char* argv[]) {
 			cerr << "Error adding user " << sqlite3_errmsg(sqldb) << endl;
 		sqlite3_finalize(stmt);
 	}
+	if (action == "userdel") {
+		panic_if(argc != 4, "Usage: userdel file.db username");
+
+		sqlite3_stmt *stmt;
+		sqlite3_prepare_v2(sqldb, "DELETE FROM `users` WHERE `username` = ?;", -1, &stmt, NULL);
+		sqlite3_bind_text (stmt, 1, argv[3], -1, NULL);
+
+		panic_if(sqlite3_step(stmt) != SQLITE_DONE || !sqlite3_changes(sqldb),
+		         "Could not delete user");
+		sqlite3_finalize(stmt);
+	}
 
 	// Close and write to disk
 	sqlite3_close(sqldb);
