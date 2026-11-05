@@ -42,45 +42,45 @@ using namespace std;
 
 const char * init_sql = "\
 	CREATE TABLE `albums` (\
-		`id`	INTEGER NOT NULL UNIQUE,\
-		`title`	TEXT,\
-		`artistid`	INTEGER,\
-		`artist`	TEXT,\
-		`hascover`	INTEGER,\
-		`cover128`	BLOB,\
-		`cover256`	BLOB,\
-		`cover512`	BLOB,\
-		`cover1024`	BLOB,\
-		`cover`	BLOB,\
+		`id`        INTEGER NOT NULL UNIQUE,\
+		`title`     TEXT NOT NULL,\
+		`artistid`  INTEGER NOT NULL,\
+		`artist`    TEXT NOT NULL,\
+		`hascover`  INTEGER NOT NULL,\
+		`cover128`  BLOB,\
+		`cover256`  BLOB,\
+		`cover512`  BLOB,\
+		`cover1024` BLOB,\
+		`cover`     BLOB,\
 		PRIMARY KEY(id)\
 	);\
 	CREATE TABLE `artists` (\
-		`id`	INTEGER NOT NULL UNIQUE,\
-		`name`	TEXT,\
+		`id`   INTEGER NOT NULL UNIQUE,\
+		`name` TEXT NOT NULL,\
 		PRIMARY KEY(id)\
 	);\
 	CREATE TABLE `songs` (\
-		`id`	INTEGER NOT NULL UNIQUE,\
-		`title`	TEXT,\
-		`albumid`	INTEGER,\
-		`album`	TEXT,\
-		`artistid`	INTEGER,\
-		`artist`	TEXT,\
-		`trackn`	INTEGER,\
-		`discn`	INTEGER,\
-		`year`	INTEGER,\
-		`duration`	INTEGER,\
-		`bitRate`	INTEGER,\
-		`genre`	TEXT,\
-		`type`	TEXT,\
-		`filename`	TEXT,\
-		`timestamp`	INTEGER,\
-		`filesize`	INTEGER,\
+		`id`        INTEGER NOT NULL UNIQUE,\
+		`title`     TEXT NOT NULL,\
+		`albumid`   INTEGER NOT NULL,\
+		`album`     TEXT NOT NULL,\
+		`artistid`  INTEGER NOT NULL,\
+		`artist`    TEXT NOT NULL,\
+		`trackn`    INTEGER NOT NULL,\
+		`discn`     INTEGER NOT NULL,\
+		`year`      INTEGER NOT NULL,\
+		`duration`  INTEGER NOT NULL,\
+		`bitRate`   INTEGER NOT NULL,\
+		`genre`     TEXT NOT NULL,\
+		`type`      TEXT NOT NULL,\
+		`filename`  TEXT NOT NULL,\
+		`timestamp` INTEGER NOT NULL,\
+		`filesize`  INTEGER NOT NULL,\
 		PRIMARY KEY(id)\
 	);\
 	CREATE TABLE `users` (\
-		`username`	TEXT NOT NULL UNIQUE,\
-		`password`	TEXT,\
+		`username` TEXT NOT NULL UNIQUE,\
+		`password` TEXT NOT NULL,\
 		PRIMARY KEY(username)\
 	);\
 ";

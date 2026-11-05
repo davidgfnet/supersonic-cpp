@@ -10,10 +10,10 @@ static const char * init_sql = "\
 	CREATE TABLE `playlists` (\
 		`id`       INTEGER NOT NULL UNIQUE PRIMARY KEY AUTOINCREMENT,\
 		`user`     TEXT NOT NULL,\
-		`name`     TEXT,\
-		`comment`  TEXT,\
-		`public`   INTEGER,\
-		`songs`    BLOB\
+		`name`     TEXT NOT NULL,\
+		`comment`  TEXT NOT NULL,\
+		`public`   INTEGER NOT NULL,\
+		`songs`    BLOB NOT NULL\
 	);\
 ";
 
