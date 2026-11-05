@@ -314,7 +314,7 @@ void scan_music_file(sqlite3 * sqldb, string fullpath) {
 
 	insert_song(sqldb, fullpath, tag->title().toCString(true), albumartist,
 		tag->album().toCString(true), ext, tag->genre().toCString(true),
-		tag->track(), tag->year(), discn, properties->length(), properties->bitrate(),
+		tag->track(), tag->year(), discn, properties->lengthInSeconds(), properties->bitrate(),
 		attrs.st_mtime, attrs.st_size);
 
 	insert_album(sqldb, tag->album().toCString(true), albumartist, cover);

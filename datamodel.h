@@ -9,6 +9,7 @@
 #include <vector>
 #include <string>
 #include <sqlite3.h>
+#include <openssl/evp.h>
 #include <openssl/md5.h>
 
 #include "util.h"
@@ -126,10 +127,9 @@ public:
 			// Query pass and get MD5, compare
 			uint8_t h[MD5_DIGEST_LENGTH];
 			std::string ndgst = std::string((char*)sqlite3_column_text(stmt, 0)) + salt;
-			MD5((uint8_t*)ndgst.c_str(), ndgst.size(), h);
 			std::string dectoken = hexdecode(token);
-
-			bool res = !memcmp(dectoken.c_str(), h, MD5_DIGEST_LENGTH);
+			bool res = EVP_Digest(ndgst.c_str(), ndgst.size(), h, NULL, EVP_md5(), NULL) &&
+			           !memcmp(dectoken.c_str(), h, MD5_DIGEST_LENGTH);
 			sqlite3_finalize(stmt);
 			return res;
 		}
