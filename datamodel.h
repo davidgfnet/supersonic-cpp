@@ -129,7 +129,9 @@ public:
 			MD5((uint8_t*)ndgst.c_str(), ndgst.size(), h);
 			std::string dectoken = hexdecode(token);
 
-			return !memcmp(dectoken.c_str(), h, MD5_DIGEST_LENGTH);
+			bool res = !memcmp(dectoken.c_str(), h, MD5_DIGEST_LENGTH);
+			sqlite3_finalize(stmt);
+			return res;
 		}
 		sqlite3_finalize(stmt);
 		return false;
