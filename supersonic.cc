@@ -218,6 +218,8 @@ private:
 
 		else if (req.uri == "/rest/getAlbum.view") {
 			Album alb = model->getAlbum(reqid);
+			if (!alb.id)
+				return Entity::error(rfmt, 70, "Album not found").respond();
 			auto songs = listSongs(rfmt, "song", &alb);
 			return Entity::wrap(Entity(rfmt, "album", {
 			                    {"id",        DS(sreqid)},
@@ -353,7 +355,8 @@ private:
 					std::list<Entity> esongs;
 					for (auto songid : pl->songs) {
 						auto song = model->getSong(songid);
-						esongs.push_back(Entity(rfmt, "entry", song->getAttrs()));
+						if (song)
+							esongs.push_back(Entity(rfmt, "entry", song->getAttrs()));
 					}
 					return Entity::wrap(Entity(rfmt, "playlist", {
 					                    {"id",        DS(std::to_string(reqid))},

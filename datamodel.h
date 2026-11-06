@@ -20,7 +20,7 @@ enum classTypes { TYPE_ALBUM = 0, TYPE_ARTIST = 1, TYPE_SONG = 2, TYPE_ERROR = 3
 class IdObj {
 public:
 	std::string sid() const { return hexencode64(id); }
-	uint64_t id;
+	uint64_t id = 0;
 };
 
 class Artist : public IdObj {
@@ -42,10 +42,10 @@ public:
 		artist   = std::string((char*)sqlite3_column_text (stmt, 3));
 		hascover = sqlite3_column_int(stmt, 4);
 	}
-	uint64_t artistid;
+	uint64_t artistid = 0;
 	std::string sartistid() const { return hexencode64(artistid); }
 	std::string title, artist;
-	int hascover;
+	int hascover = 0;
 };
 
 class Song : public IdObj {
