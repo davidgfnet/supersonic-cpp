@@ -174,7 +174,7 @@ private:
 			};
 
 			return Entity::wrap(Entity(rfmt, "directory", {
-			                    {"id",   DS(std::to_string(reqid))},
+			                    {"id",   DS(sreqid)},
 			                    {"name", DS(tname)}},
 			                    entities)).respond();
 		}
@@ -226,7 +226,7 @@ private:
 			                    {"name",      DS(alb.title)},
 			                    {"type",      DS("music")},
 			                    {"songCount", DI(songs.size())},
-			                    {"coverArt",  DS(sreqid)},
+			                    {"coverArt",  alb.hascover ? DS(sreqid) : DN()},
 			                    {"artist",    DS(alb.artist)},
 			                    {"artistId",  DS(alb.sartistid())}},
 			                    songs)).respond();
@@ -342,6 +342,8 @@ private:
 			}
 			unsigned size = atoi(getone(req.vars, "size", "").c_str());
 			std::string img = model->getAlbumCover(albumid, size);
+			if (img.empty())
+				return Entity::error(rfmt, 70, "Cover art not found").respond();
 			return new str_resp("Status: 200\r\n"
 				"Content-Type: image/jpeg\r\n"
 				"Content-Length: " + std::to_string(img.size()) + "\r\n", img);
