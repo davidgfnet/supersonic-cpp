@@ -35,7 +35,7 @@
 #define STBI_WRITE_NO_STDIO
 #define STBI_NO_STDIO
 #include "stb_image.h"
-#include "stb_image_resize.h"
+#include "stb_image_resize2.h"
 #include "stb_image_write.h"
 
 using namespace std;
@@ -153,9 +153,8 @@ void insert_album(sqlite3 * sqldb, string album, string artist, string cover) {
 			if (nw <= width && nh <= height) {
 				unsigned osize = nw*nh*3;
 				std::string tmpb(osize, '\0');
-				stbir_resize_uint8(original, width, height, 0, (uint8_t*)&tmpb[0], nw, nh, 0, 3);
-
-				stbi_write_jpg_to_func(wfn, &smallcover[i], nw, nh, 3, tmpb.c_str(), 70);
+				if (stbir_resize_uint8_linear(original, width, height, 0, (uint8_t*)&tmpb[0], nw, nh, 0, STBIR_RGB))
+					stbi_write_jpg_to_func(wfn, &smallcover[i], nw, nh, 3, tmpb.c_str(), 70);
 			}
 		}
 		stbi_image_free(original);
