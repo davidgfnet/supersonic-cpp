@@ -34,9 +34,15 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #define STBI_WRITE_NO_STDIO
 #define STBI_NO_STDIO
+#define STBI_NO_PSD
+#define STBI_NO_HDR
+#define STBI_NO_BMP
+#define STBI_NO_TGA
 #include "stb_image.h"
 #include "stb_image_resize2.h"
 #include "stb_image_write.h"
+
+#define MAX_COVER_DIM 8096
 
 using namespace std;
 
@@ -121,6 +127,12 @@ std::set<uint64_t> processed_albums;
 std::mutex albummutex;
 
 void insert_album(sqlite3 * sqldb, string album, string artist, string cover) {
+	// Ignore huge covers, a tiny file can decode into gigabytes
+	int width = 0, height = 0, nchan = 0;
+	if (stbi_info_from_memory((uint8_t*)cover.data(), cover.size(), &width, &height, &nchan) &&
+		(width > MAX_COVER_DIM || height > MAX_COVER_DIM))
+			cover.clear();
+
 	// Check if some other worker is already working/worked in this album.
 	// This is to avoid processing covers more than once (expensive!)
 	uint64_t albumid = calcId(album + "@" + artist, TYPE_ALBUM);
@@ -135,11 +147,10 @@ void insert_album(sqlite3 * sqldb, string album, string artist, string cover) {
 	const unsigned sizes[4] = {128, 256, 512, 1024};
 	std::string smallcover[4];
 	if (cover.size()) {
-		int width, height, nchan;
 		stbi_uc *original = stbi_load_from_memory((uint8_t*)cover.c_str(), cover.size(),
 		                                          &width, &height, &nchan, 3);
 
-		for (unsigned i = 0; i < 4; i++) {
+		for (unsigned i = 0; original && i < 4; i++) {
 			int nw, nh;
 			if (width > height) {
 				nw = sizes[i];
