@@ -55,12 +55,29 @@ std::string urldec(const std::string &s) {
 
 std::string cescape(std::string content, bool isxml) {
 	std::string escaped;
-	for (auto c: content)
-		if (c == '"') escaped += "&quot;";
-		else if (isxml && c == '<') escaped += "&lt;";
-		else if (isxml && c == '>') escaped += "&gt;";
-		else if (isxml && c == '&') escaped += "&amp;";
-		else escaped += c;
+	for (unsigned char c: content) {
+		if (isxml) {
+			if (c == '"') escaped += "&quot;";
+			else if (c == '\'') escaped += "&apos;";
+			else if (c == '<') escaped += "&lt;";
+			else if (c == '>') escaped += "&gt;";
+			else if (c == '&') escaped += "&amp;";
+			// Most control chars cannot be represented in XML 1.0, not even escaped
+			else if (c < 0x20 && c != '\t' && c != '\n' && c != '\r') continue;
+			else escaped += c;
+		}
+		else {
+			if (c == '"') escaped += "\\\"";
+			else if (c == '\\') escaped += "\\\\";
+			else if (c < 0x20) {
+				const static char hcs[] = "0123456789abcdef";
+				escaped += "\\u00";
+				escaped += hcs[c >> 4];
+				escaped += hcs[c & 15];
+			}
+			else escaped += c;
+		}
+	}
 	return escaped;
 }
 

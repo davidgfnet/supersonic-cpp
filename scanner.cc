@@ -34,10 +34,8 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #define STBI_WRITE_NO_STDIO
 #define STBI_NO_STDIO
-#define STBI_NO_PSD
-#define STBI_NO_HDR
-#define STBI_NO_BMP
-#define STBI_NO_TGA
+#define STBI_ONLY_JPEG
+#define STBI_ONLY_PNG
 #include "stb_image.h"
 #include "stb_image_resize2.h"
 #include "stb_image_write.h"
