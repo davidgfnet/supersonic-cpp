@@ -26,8 +26,9 @@ std::string base64Decode(const std::string & input);
 // Parses variables in the body of a request, or in a GET query
 std::unordered_multimap<std::string, std::string> parse_vars(std::string body);
 
-// Parses a Range Header expression into byte ranges
-std::pair<uint64_t, uint64_t> parse_range(std::string h);
+// Parses a Range header for a file of fsz bytes. Returns 1 and sets first/size
+// if valid, -1 if it cannot be satisfied, 0 if the header should be ignored.
+int parse_range(const std::string &h, uint64_t fsz, uint64_t *first, uint64_t *size);
 
 // Some inline stuff, LE magic
 static uint64_t a2i64(const uint8_t *h) {

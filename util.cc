@@ -139,22 +139,42 @@ std::unordered_multimap<std::string, std::string> parse_vars(std::string body) {
 	return vars;
 }
 
-std::pair<uint64_t, uint64_t> parse_range(std::string h) {
-	// h is like bytes=X-Y (we ignore other formats)
-	if (h.size() < 8 || h.substr(0, 6) != "bytes=")
-		return {0, ~0ULL};
+static bool parse_u64(const std::string &s, uint64_t *out) {
+	uint64_t v = 0;
+	for (char c : s) {
+		if (c < '0' || c > '9' || v > (~0ULL - (c - '0')) / 10)
+			return false;
+		v = v * 10 + (c - '0');
+	}
+	*out = v;
+	return !s.empty();
+}
 
-	h = h.substr(6);
-	uint64_t startoff = atoll(h.c_str());
-
+int parse_range(const std::string &h, uint64_t fsz, uint64_t *first, uint64_t *size) {
+	// h is like bytes=X-Y, bytes=X- or bytes=-N (we ignore other formats)
 	auto p = h.find('-');
-	if (p == std::string::npos)
-		return {0, ~0ULL};
+	if (h.compare(0, 6, "bytes=") || p == std::string::npos)
+		return 0;
 
-	uint64_t csize = atoll(&h[p+1]);
-	if (h.size() <= p+1)
-		csize = ~0ULL;
+	uint64_t a = 0, b = ~0ULL;
+	if (p == 6) {
+		if (!parse_u64(h.substr(7), &b))
+			return 0;
+		if (!b || !fsz)
+			return -1;
+		*size = b < fsz ? b : fsz;
+		*first = fsz - *size;
+		return 1;
+	}
 
-	return {startoff, csize};
+	if (!parse_u64(h.substr(6, p - 6), &a))
+		return 0;
+	if (p + 1 < h.size() && (!parse_u64(h.substr(p + 1), &b) || b < a))
+		return 0;
+	if (a >= fsz)
+		return -1;
+	*first = a;
+	*size = (b < fsz - 1 ? b : fsz - 1) - a + 1;
+	return 1;
 }
 

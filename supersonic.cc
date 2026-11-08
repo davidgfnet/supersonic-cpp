@@ -24,8 +24,7 @@
 
 
 struct web_req {
-	uint64_t offset, lastbyte;
-	std::string method, host, uri;
+	std::string method, host, uri, range;
 	std::unordered_multimap<std::string, std::string> vars;
 };
 
@@ -61,23 +60,26 @@ private:
 
 	class stream_responder : public fcgi_responder {
 	public:
-		stream_responder(FILE* f, uint64_t offset = 0, uint64_t size = ~0ULL)
-		  : f(f), offset(offset), ret_size(size) {
+		stream_responder(FILE* f, uint64_t offset, uint64_t size, uint64_t total, bool partial)
+		  : f(f), offset(offset), ret_size(size), total(total), partial(partial) {
 			// Seek to offset
 			fseeko(f, offset, SEEK_SET);
 		}
 		~stream_responder() { if (f) fclose(f); }
 
 		virtual std::string header() {
-			if (ret_size != ~0ULL || offset > 0)
+			if (partial)
 				return "Status: 206\r\n"
 					"Content-Type: application/octet-stream\r\n"
+					"Accept-Ranges: bytes\r\n"
 					"Content-Range: bytes " +
-						std::to_string(offset) + "-" + std::to_string(offset + ret_size - 1) + "/*\r\n"
+						std::to_string(offset) + "-" + std::to_string(offset + ret_size - 1) + "/" +
+						std::to_string(total) + "\r\n"
 					"Content-Length: " + std::to_string(ret_size) + "\r\n";
 			else
 				return "Status: 200\r\n"
 					"Content-Type: application/octet-stream\r\n"
+					"Accept-Ranges: bytes\r\n"
 					"Content-Length: " + std::to_string(ret_size) + "\r\n";
 		}
 
@@ -99,7 +101,8 @@ private:
 
 	private:
 		FILE* f;
-		uint64_t offset, ret_size;
+		uint64_t offset, ret_size, total;
+		bool partial;
 	};
 
 	bool checkCredentials(std::string user, web_req& req) {
@@ -284,15 +287,14 @@ private:
 				}
 				// Stream the data to the user if found
 				if (fd) {
-					// Easier to count this way, prevent overflow
-					req.lastbyte = std::max(req.lastbyte, req.lastbyte + 1);
-					uint64_t fsz = fsize(fd);
-					if (req.lastbyte > fsz)
-						req.lastbyte = fsz;
-
-					if (req.lastbyte > req.offset)
-						return new stream_responder(fd, req.offset, req.lastbyte - req.offset);
+					uint64_t fsz = fsize(fd), first = 0, size = fsz;
+					int r = parse_range(req.range, fsz, &first, &size);
+					if (r >= 0)
+						return new stream_responder(fd, first, size, fsz, r > 0);
 					fclose(fd);
+					return new str_resp("Status: 416\r\n"
+						"Content-Range: bytes */" + std::to_string(fsz) + "\r\n"
+						"Content-Length: 0\r\n", "");
 				}
 			}
 		}
@@ -457,7 +459,7 @@ public:
 			wreq.uri      = FCGX_GetParam("DOCUMENT_URI", req->envp) ?: "";
 			wreq.vars     = parse_vars(FCGX_GetParam("QUERY_STRING", req->envp) ?: "");
 			wreq.host     = FCGX_GetParam("HTTP_HOST", req->envp) ?: "";
-			std::tie(wreq.offset, wreq.lastbyte) = parse_range(FCGX_GetParam("HTTP_RANGE", req->envp) ?: "");
+			wreq.range    = FCGX_GetParam("HTTP_RANGE", req->envp) ?: "";
 
 			std::unique_ptr<fcgi_responder> resp(this->handle(wreq, req.get()));
 
