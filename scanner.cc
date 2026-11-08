@@ -400,6 +400,7 @@ int main(int argc, char* argv[]) {
 	sqlite3_exec(sqldb, "PRAGMA synchronous = OFF", NULL, NULL, NULL);
 
 	if (action == "scan") {
+		panic_if(argc != 4, "Usage: scan file.db musicdir/");
 		string musicdir = argv[3];
 
 		sqlite3_exec(sqldb, init_sql, NULL, NULL, NULL);
@@ -416,6 +417,7 @@ int main(int argc, char* argv[]) {
 			t.join();
 	}
 	if (action == "useradd") {
+		panic_if(argc != 5, "Usage: useradd file.db username password");
 		string user = argv[3];
 		string pass = argv[4];
 
