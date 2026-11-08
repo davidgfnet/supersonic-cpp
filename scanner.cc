@@ -125,16 +125,31 @@ std::set<uint64_t> processed_albums;
 std::mutex albummutex;
 
 void insert_album(sqlite3 * sqldb, string album, string artist, string cover) {
+	// Create or refresh the album, but keep any cover another track already stored
+	uint64_t albumid = calcId(album + "@" + artist, TYPE_ALBUM);
+	sqlite3_stmt *stmt;
+	sqlite3_prepare_v2(sqldb, "INSERT INTO `albums` "
+		"(`id`, `title`, `artistid`, `artist`, `hascover`, `cover`, "
+		"`cover128`, `cover256`, `cover512`, `cover1024`) "
+		"VALUES (?,?,?,?,0,x'',x'',x'',x'',x'') "
+		"ON CONFLICT(`id`) DO UPDATE SET `title`=excluded.`title`, "
+		"`artistid`=excluded.`artistid`, `artist`=excluded.`artist`;", -1, &stmt, NULL);
+	sqlite3_bind_int64(stmt, 1, albumid);
+	sqlite3_bind_text (stmt, 2, album.c_str(), -1, NULL);
+	sqlite3_bind_int64(stmt, 3, calcId(artist, TYPE_ARTIST));
+	sqlite3_bind_text (stmt, 4, artist.c_str(), -1, NULL);
+	sqlite3_step(stmt);
+	sqlite3_finalize(stmt);
+
 	// Ignore huge covers, a tiny file can decode into gigabytes
 	int width = 0, height = 0, nchan = 0;
-	if (stbi_info_from_memory((uint8_t*)cover.data(), cover.size(), &width, &height, &nchan) &&
-		(width > MAX_COVER_DIM || height > MAX_COVER_DIM))
-			cover.clear();
+	if (!stbi_info_from_memory((uint8_t*)cover.data(), cover.size(), &width, &height, &nchan) ||
+		width > MAX_COVER_DIM || height > MAX_COVER_DIM)
+		return;
 
 	// Check if some other worker is already working/worked in this album.
 	// This is to avoid processing covers more than once (expensive!)
-	uint64_t albumid = calcId(album + "@" + artist, TYPE_ALBUM);
-	if (!cover.empty()) {
+	{
 		std::lock_guard<std::mutex> g(albummutex);
 		if (processed_albums.count(albumid))
 			return;
@@ -144,46 +159,37 @@ void insert_album(sqlite3 * sqldb, string album, string artist, string cover) {
 	// Create several versions of this cover, so we can serve different sizes
 	const unsigned sizes[4] = {128, 256, 512, 1024};
 	std::string smallcover[4];
-	if (cover.size()) {
-		stbi_uc *original = stbi_load_from_memory((uint8_t*)cover.c_str(), cover.size(),
-		                                          &width, &height, &nchan, 3);
+	stbi_uc *original = stbi_load_from_memory((uint8_t*)cover.c_str(), cover.size(),
+	                                          &width, &height, &nchan, 3);
 
-		for (unsigned i = 0; original && i < 4; i++) {
-			int nw, nh;
-			if (width > height) {
-				nw = sizes[i];
-				nh = sizes[i] * (double)height / (double)width;
-			}else{
-				nh = sizes[i];
-				nw = sizes[i] * (double)width / (double)height;
-			}
-
-			// We only shrink, never enlarge
-			if (nw <= width && nh <= height) {
-				unsigned osize = nw*nh*3;
-				std::string tmpb(osize, '\0');
-				if (stbir_resize_uint8_linear(original, width, height, 0, (uint8_t*)&tmpb[0], nw, nh, 0, STBIR_RGB))
-					stbi_write_jpg_to_func(wfn, &smallcover[i], nw, nh, 3, tmpb.c_str(), 70);
-			}
+	for (unsigned i = 0; original && i < 4; i++) {
+		int nw, nh;
+		if (width > height) {
+			nw = sizes[i];
+			nh = sizes[i] * (double)height / (double)width;
+		}else{
+			nh = sizes[i];
+			nw = sizes[i] * (double)width / (double)height;
 		}
-		stbi_image_free(original);
-	}
 
-	sqlite3_stmt *stmt;
-	sqlite3_prepare_v2(sqldb, "INSERT OR REPLACE INTO `albums` "
-		"(`id`, `title`, `artistid`, `artist`, `hascover`, `cover`, "
-		"`cover128`, `cover256`, `cover512`, `cover1024`) "
-		"VALUES (?,?,?,?,?,?,?,?,?,?);", -1, &stmt, NULL);
-	sqlite3_bind_int64(stmt, 1, albumid);
-	sqlite3_bind_text (stmt, 2, album.c_str(), -1, NULL);
-	sqlite3_bind_int64(stmt, 3, calcId(artist, TYPE_ARTIST));
-	sqlite3_bind_text (stmt, 4, artist.c_str(), -1, NULL);
-	sqlite3_bind_int64(stmt, 5, cover.size() ? 1 : 0);
-	sqlite3_bind_blob (stmt, 6, cover.data(), cover.size(), NULL);
-	sqlite3_bind_blob (stmt, 7, smallcover[0].data(), smallcover[0].size(), NULL);
-	sqlite3_bind_blob (stmt, 8, smallcover[1].data(), smallcover[1].size(), NULL);
-	sqlite3_bind_blob (stmt, 9, smallcover[2].data(), smallcover[2].size(), NULL);
-	sqlite3_bind_blob (stmt,10, smallcover[3].data(), smallcover[3].size(), NULL);
+		// We only shrink, never enlarge
+		if (nw <= width && nh <= height) {
+			unsigned osize = nw*nh*3;
+			std::string tmpb(osize, '\0');
+			if (stbir_resize_uint8_linear(original, width, height, 0, (uint8_t*)&tmpb[0], nw, nh, 0, STBIR_RGB))
+				stbi_write_jpg_to_func(wfn, &smallcover[i], nw, nh, 3, tmpb.c_str(), 70);
+		}
+	}
+	stbi_image_free(original);
+
+	sqlite3_prepare_v2(sqldb, "UPDATE `albums` SET `hascover`=1, `cover`=?, "
+		"`cover128`=?, `cover256`=?, `cover512`=?, `cover1024`=? WHERE `id`=?;", -1, &stmt, NULL);
+	sqlite3_bind_blob (stmt, 1, cover.data(), cover.size(), NULL);
+	sqlite3_bind_blob (stmt, 2, smallcover[0].data(), smallcover[0].size(), NULL);
+	sqlite3_bind_blob (stmt, 3, smallcover[1].data(), smallcover[1].size(), NULL);
+	sqlite3_bind_blob (stmt, 4, smallcover[2].data(), smallcover[2].size(), NULL);
+	sqlite3_bind_blob (stmt, 5, smallcover[3].data(), smallcover[3].size(), NULL);
+	sqlite3_bind_int64(stmt, 6, albumid);
 	sqlite3_step(stmt);
 	sqlite3_finalize(stmt);
 }
