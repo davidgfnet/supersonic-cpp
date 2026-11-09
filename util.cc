@@ -1,5 +1,7 @@
 
 
+#include <time.h>
+
 #include "util.h"
 
 unsigned char hexdec(char c) {
@@ -137,6 +139,15 @@ std::unordered_multimap<std::string, std::string> parse_vars(std::string body) {
 	}
 
 	return vars;
+}
+
+std::string isotime(uint64_t t) {
+	time_t tt = t;
+	struct tm tm;
+	char buf[32];
+	gmtime_r(&tt, &tm);
+	strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+	return buf;
 }
 
 static bool parse_u64(const std::string &s, uint64_t *out) {

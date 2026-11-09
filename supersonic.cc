@@ -137,6 +137,33 @@ private:
 		return esongs;
 	}
 
+	// Playlist with its attributes and, optionally, its songs. Songs no longer
+	// in the library are skipped (and not counted).
+	Entity playlistEntity(RespFmt fmt, const PlayList &pl, bool withsongs) {
+		std::list<Entity> esongs;
+		unsigned count = 0, duration = 0;
+		for (auto songid : pl.songs) {
+			auto song = model->getSong(songid);
+			if (song) {
+				count++;
+				duration += song->duration;
+				if (withsongs)
+					esongs.push_back(Entity(fmt, "entry", song->getAttrs()));
+			}
+		}
+		return Entity(fmt, "playlist", {
+		              {"id",        DS(hexencode64(pl.id))},
+		              {"name",      DS(pl.name)},
+		              {"comment",   DS(pl.comment)},
+		              {"owner",     DS(pl.username)},
+		              {"public",    DB(pl.upublic)},
+		              {"songCount", DI(count)},
+		              {"duration",  DI(duration)},
+		              {"created",   DS(isotime(pl.created))},
+		              {"changed",   DS(isotime(pl.changed))}},
+		              esongs);
+	}
+
 	fcgi_responder* handle(web_req& req, FCGX_Request *fastcgi_req) {
 		if (req.method != "HEAD" && req.method != "GET" && req.method != "POST")
 			return respond_method_not_allowed();
@@ -351,50 +378,23 @@ private:
 				"Content-Length: " + std::to_string(img.size()) + "\r\n", img);
 		}
 		// Playlist management
-		// getPlaylists getPlaylist createPlaylist updatePlaylist deletePlaylist 
 		else if (req.uri == "/rest/getPlaylist.view") {
 			auto pl = udata->getPlaylist(reqid);
-			if (pl) {
-				if (pl->upublic || pl->username == user) {
-					std::list<Entity> esongs;
-					for (auto songid : pl->songs) {
-						auto song = model->getSong(songid);
-						if (song)
-							esongs.push_back(Entity(rfmt, "entry", song->getAttrs()));
-					}
-					return Entity::wrap(Entity(rfmt, "playlist", {
-					                    {"id",        DS(std::to_string(reqid))},
-					                    {"name",      DS(pl->name)},
-					                    {"comment",   DS(pl->comment)},
-					                    {"owner",     DS(pl->username)},
-					                    {"public",    DB(pl->upublic)},
-					                    {"songCount", DI(pl->songs.size())}},
-					                    esongs)).respond();
-				}
-				else
-					return Entity::error(rfmt, 50, "Permission denied").respond();
-			}
-			else
+			if (!pl)
 				return Entity::error(rfmt, 70, "Playlist not found").respond();
+			if (!pl->upublic && pl->username != user)
+				return Entity::error(rfmt, 50, "Permission denied").respond();
+			return Entity::wrap(playlistEntity(rfmt, *pl, true)).respond();
 		}
 		else if (req.uri == "/rest/getPlaylists.view") {
 			std::list<Entity> eplaylists;
-			for (const auto & pl : udata->getPlaylists(user)) {
-				eplaylists.push_back(Entity::wrap(Entity(rfmt, "playlist", {
-				                    {"id",        DS(std::to_string(reqid))},
-				                    {"name",      DS(pl.name)},
-				                    {"comment",   DS(pl.comment)},
-				                    {"owner",     DS(pl.username)},
-				                    {"public",    DB(pl.upublic)},
-				                    {"songCount", DI(pl.songs.size())}})));
-			}
+			for (const auto & pl : udata->getPlaylists(user))
+				eplaylists.push_back(playlistEntity(rfmt, pl, false));
 			return Entity::wrap(Entity(rfmt, "playlists", {}, eplaylists)).respond();
 		}
 
 		// All the unsupported features, like podcasts & video calls are mocked out here.
 		// Denies permissions to all updates and returns empty yet valid responses to all queries
-		else if (req.uri == "/rest/getPlaylists.view")
-			return Entity::wrap(Entity(rfmt, "playlists", {}, {})).respond();
 		else if (req.uri == "/rest/getGenres.view")
 			return Entity::wrap(Entity(rfmt, "genres", {}, {})).respond();
 		else if (req.uri == "/rest/getPodcasts.view")

@@ -26,6 +26,9 @@ std::string base64Decode(const std::string & input);
 // Parses variables in the body of a request, or in a GET query
 std::unordered_multimap<std::string, std::string> parse_vars(std::string body);
 
+// Formats a unix timestamp as ISO 8601 (UTC)
+std::string isotime(uint64_t t);
+
 // Parses a Range header for a file of fsz bytes. Returns 1 and sets first/size
 // if valid, -1 if it cannot be satisfied, 0 if the header should be ignored.
 int parse_range(const std::string &h, uint64_t fsz, uint64_t *first, uint64_t *size);

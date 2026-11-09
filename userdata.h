@@ -13,14 +13,12 @@ class PlayList {
 public:
 	PlayList(sqlite3_stmt *);
 
-	// Flush changes to database
-	void flush(sqlite3 *db) const;
-
 	// Attrs
 	uint64_t id;
 	std::string name, comment, username;
 	bool upublic;
 	std::vector<uint64_t> songs;
+	uint64_t created, changed;
 };
 
 class UserData {
@@ -34,7 +32,7 @@ public:
 	// No authentication here at all!
 	std::unique_ptr<PlayList> getPlaylist(uint64_t pid);
 
-	// Gets all playlists for a user, no auth as well.
+	// Gets all playlists a user can see (own and public ones), no auth as well.
 	std::list<PlayList> getPlaylists(std::string user);
 };
 

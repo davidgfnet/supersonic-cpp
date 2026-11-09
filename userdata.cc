@@ -13,9 +13,13 @@ static const char * init_sql = "\
 		`name`     TEXT NOT NULL,\
 		`comment`  TEXT NOT NULL,\
 		`public`   INTEGER NOT NULL,\
-		`songs`    BLOB NOT NULL\
+		`songs`    BLOB NOT NULL,\
+		`created`  INTEGER NOT NULL,\
+		`changed`  INTEGER NOT NULL\
 	);\
 ";
+
+#define PL_COLUMNS "`id`, name, comment, user, public, songs, created, changed"
 
 PlayList::PlayList(sqlite3_stmt * stmt) {
 	id       = sqlite3_column_int64 (stmt, 0);
@@ -29,26 +33,9 @@ PlayList::PlayList(sqlite3_stmt * stmt) {
 	std::string data((char*)sqlite3_column_blob(stmt, 5), length);
 	for (unsigned i = 0; i < length / 8U; i++)
 		songs.push_back(a2i64((uint8_t*)&data[i * 8]));
-}
 
-void PlayList::flush(sqlite3 *db) const {
-	sqlite3_stmt *stmt;
-	sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO playlists "
-	                   "`id`, name, comment, user, public, songs VALUES "
-	                   "(?, ?, ?, ?, ?, ?)", -1, &stmt, NULL);
-	sqlite3_bind_int64(stmt, 1, id);
-	sqlite3_bind_text (stmt, 2, name.c_str(), -1, NULL);
-	sqlite3_bind_text (stmt, 3, comment.c_str(), -1, NULL);
-	sqlite3_bind_text (stmt, 4, username.c_str(), -1, NULL);
-	sqlite3_bind_int64(stmt, 5, upublic ? 1 : 0);
-
-	std::string data; data.reserve(songs.size() * sizeof(uint64_t));
-	for (auto s : songs)
-		data += i642a(s);
-	sqlite3_bind_blob(stmt, 6, data.c_str(), data.size(), NULL);
-
-	sqlite3_step(stmt);
-	sqlite3_finalize(stmt);
+	created  = sqlite3_column_int64 (stmt, 6);
+	changed  = sqlite3_column_int64 (stmt, 7);
 }
 
 UserData::UserData(sqlite3 *db) {
@@ -64,8 +51,7 @@ UserData::~UserData() {
 
 std::unique_ptr<PlayList> UserData::getPlaylist(uint64_t pid) {
 	sqlite3_stmt *stmt;
-	sqlite3_prepare_v2(dbh, "SELECT `id`, name, comment, user, public, songs "
-	                   "FROM playlists WHERE `id` = ?", -1, &stmt, NULL);
+	sqlite3_prepare_v2(dbh, "SELECT " PL_COLUMNS " FROM playlists WHERE `id` = ?", -1, &stmt, NULL);
 	sqlite3_bind_int64(stmt, 1, pid);
 	PlayList *ret = nullptr;
 	if (sqlite3_step(stmt) == SQLITE_ROW)
@@ -76,8 +62,8 @@ std::unique_ptr<PlayList> UserData::getPlaylist(uint64_t pid) {
 
 std::list<PlayList> UserData::getPlaylists(std::string user) {
 	sqlite3_stmt *stmt;
-	sqlite3_prepare_v2(dbh, "SELECT `id`, name, comment, user, public, songs "
-	                   "FROM playlists WHERE user = ?", -1, &stmt, NULL);
+	sqlite3_prepare_v2(dbh, "SELECT " PL_COLUMNS " FROM playlists WHERE user = ? OR public = 1",
+	                   -1, &stmt, NULL);
 	sqlite3_bind_text(stmt, 1, user.c_str(), -1, NULL);
 	std::list<PlayList> ret;
 	while (sqlite3_step(stmt) == SQLITE_ROW)
@@ -86,4 +72,3 @@ std::list<PlayList> UserData::getPlaylists(std::string user) {
 	sqlite3_finalize(stmt);
 	return ret;
 }
-
