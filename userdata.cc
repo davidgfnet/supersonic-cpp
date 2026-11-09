@@ -1,4 +1,6 @@
 
+#include <time.h>
+
 #include "userdata.h"
 #include "datamodel.h"
 #include "util.h"
@@ -71,4 +73,47 @@ std::list<PlayList> UserData::getPlaylists(std::string user) {
 
 	sqlite3_finalize(stmt);
 	return ret;
+}
+
+std::unique_ptr<PlayList> UserData::createPlaylist(const std::string &user, const std::string &name) {
+	sqlite3_stmt *stmt;
+	sqlite3_prepare_v2(dbh, "INSERT INTO playlists (user, name, comment, public, songs, created, changed) "
+	                   "VALUES (?, ?, '', 0, x'', ?, ?)", -1, &stmt, NULL);
+	sqlite3_bind_text (stmt, 1, user.c_str(), -1, NULL);
+	sqlite3_bind_text (stmt, 2, name.c_str(), -1, NULL);
+	sqlite3_bind_int64(stmt, 3, time(NULL));
+	sqlite3_bind_int64(stmt, 4, time(NULL));
+	int r = sqlite3_step(stmt);
+	sqlite3_finalize(stmt);
+	if (r != SQLITE_DONE)
+		return nullptr;
+	// Safe since mtx serializes all inserts on this (shared) connection
+	return getPlaylist(sqlite3_last_insert_rowid(dbh));
+}
+
+void UserData::savePlaylist(PlayList &pl) {
+	pl.changed = time(NULL);
+	std::string data; data.reserve(pl.songs.size() * sizeof(uint64_t));
+	for (auto s : pl.songs)
+		data += i642a(s);
+
+	sqlite3_stmt *stmt;
+	sqlite3_prepare_v2(dbh, "UPDATE playlists SET name = ?, comment = ?, public = ?, songs = ?, "
+	                   "changed = ? WHERE `id` = ?", -1, &stmt, NULL);
+	sqlite3_bind_text (stmt, 1, pl.name.c_str(), -1, NULL);
+	sqlite3_bind_text (stmt, 2, pl.comment.c_str(), -1, NULL);
+	sqlite3_bind_int64(stmt, 3, pl.upublic ? 1 : 0);
+	sqlite3_bind_blob (stmt, 4, data.data(), data.size(), NULL);
+	sqlite3_bind_int64(stmt, 5, pl.changed);
+	sqlite3_bind_int64(stmt, 6, pl.id);
+	sqlite3_step(stmt);
+	sqlite3_finalize(stmt);
+}
+
+void UserData::deletePlaylist(uint64_t pid) {
+	sqlite3_stmt *stmt;
+	sqlite3_prepare_v2(dbh, "DELETE FROM playlists WHERE `id` = ?", -1, &stmt, NULL);
+	sqlite3_bind_int64(stmt, 1, pid);
+	sqlite3_step(stmt);
+	sqlite3_finalize(stmt);
 }

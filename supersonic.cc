@@ -6,6 +6,8 @@
 #include <list>
 #include <thread>
 #include <memory>
+#include <mutex>
+#include <set>
 #include <unordered_map>
 #include <fcgio.h>
 #include <unistd.h>
@@ -19,12 +21,15 @@
 #include "fcgihelper.h"
 #include "resphelper.h"
 
+// Keeps the playlist blob (8 bytes per song) and responses reasonably sized
+#define MAX_PLAYLIST_SONGS 10000
+
 #define getone(m, k, def) \
 	((m).find(k) == (m).end() ? def : (m).find(k)->second)
 
 
 struct web_req {
-	std::string method, host, uri, range;
+	std::string method, host, uri, range, query;
 	std::unordered_multimap<std::string, std::string> vars;
 };
 
@@ -162,6 +167,15 @@ private:
 		              {"created",   DS(isotime(pl.created))},
 		              {"changed",   DS(isotime(pl.changed))}},
 		              esongs);
+	}
+
+	// Appends the songs passed as (repeated) key
+	void addSongs(PlayList *pl, const web_req &req, const std::string &key) {
+		for (const auto &sid : parse_var_list(req.query, key)) {
+			if (pl->songs.size() >= MAX_PLAYLIST_SONGS)
+				break;
+			pl->songs.push_back(hexdecode64(sid));
+		}
 	}
 
 	fcgi_responder* handle(web_req& req, FCGX_Request *fastcgi_req) {
@@ -392,6 +406,73 @@ private:
 				eplaylists.push_back(playlistEntity(rfmt, pl, false));
 			return Entity::wrap(Entity(rfmt, "playlists", {}, eplaylists)).respond();
 		}
+		else if (req.uri == "/rest/createPlaylist.view") {
+			// Creates a new playlist (name) or replaces the songs of an existing one (playlistId)
+			std::lock_guard<std::mutex> g(udata->mtx);
+			std::unique_ptr<PlayList> pl;
+			if (req.vars.count("playlistId")) {
+				pl = udata->getPlaylist(hexdecode64(getone(req.vars, "playlistId", "")));
+				if (!pl)
+					return Entity::error(rfmt, 70, "Playlist not found").respond();
+				if (pl->username != user)
+					return Entity::error(rfmt, 50, "Permission denied").respond();
+				pl->songs.clear();
+			}
+			else {
+				std::string name = getone(req.vars, "name", "");
+				if (name.empty())
+					return Entity::error(rfmt, 10, "Parameter name missing").respond();
+				pl = udata->createPlaylist(user, name);
+				if (!pl)
+					return Entity::error(rfmt, 0, "Could not create playlist").respond();
+			}
+			addSongs(pl.get(), req, "songId");
+			udata->savePlaylist(*pl);
+			return Entity::wrap(playlistEntity(rfmt, *pl, true)).respond();
+		}
+		else if (req.uri == "/rest/updatePlaylist.view") {
+			std::lock_guard<std::mutex> g(udata->mtx);
+			auto pl = udata->getPlaylist(hexdecode64(getone(req.vars, "playlistId", "")));
+			if (!pl)
+				return Entity::error(rfmt, 70, "Playlist not found").respond();
+			if (pl->username != user)
+				return Entity::error(rfmt, 50, "Permission denied").respond();
+
+			if (req.vars.count("name"))
+				pl->name = getone(req.vars, "name", "");
+			if (req.vars.count("comment"))
+				pl->comment = getone(req.vars, "comment", "");
+			if (req.vars.count("public"))
+				pl->upublic = getone(req.vars, "public", "") == "true";
+
+			// Indices refer to the list the client saw before this update (missing
+			// songs are not shown), so map them to stored positions and remove from the end
+			std::set<unsigned, std::greater<unsigned>> rmidx;
+			for (const auto &idx : parse_var_list(req.query, "songIndexToRemove"))
+				if (!idx.empty() && idx.size() < 9 && idx.find_first_not_of("0123456789") == std::string::npos)
+					rmidx.insert(atoi(idx.c_str()));
+			std::vector<size_t> shown;
+			for (size_t i = 0; !rmidx.empty() && i < pl->songs.size(); i++)
+				if (model->getSong(pl->songs[i]))
+					shown.push_back(i);
+			for (auto idx : rmidx)
+				if (idx < shown.size())
+					pl->songs.erase(pl->songs.begin() + shown[idx]);
+
+			addSongs(pl.get(), req, "songIdToAdd");
+			udata->savePlaylist(*pl);
+			return Entity::wrap(rfmt).respond();
+		}
+		else if (req.uri == "/rest/deletePlaylist.view") {
+			std::lock_guard<std::mutex> g(udata->mtx);
+			auto pl = udata->getPlaylist(reqid);
+			if (!pl)
+				return Entity::error(rfmt, 70, "Playlist not found").respond();
+			if (pl->username != user)
+				return Entity::error(rfmt, 50, "Permission denied").respond();
+			udata->deletePlaylist(pl->id);
+			return Entity::wrap(rfmt).respond();
+		}
 
 		// All the unsupported features, like podcasts & video calls are mocked out here.
 		// Denies permissions to all updates and returns empty yet valid responses to all queries
@@ -457,7 +538,8 @@ public:
 			web_req wreq;
 			wreq.method   = FCGX_GetParam("REQUEST_METHOD", req->envp) ?: "";
 			wreq.uri      = FCGX_GetParam("DOCUMENT_URI", req->envp) ?: "";
-			wreq.vars     = parse_vars(FCGX_GetParam("QUERY_STRING", req->envp) ?: "");
+			wreq.query    = FCGX_GetParam("QUERY_STRING", req->envp) ?: "";
+			wreq.vars     = parse_vars(wreq.query);
 			wreq.host     = FCGX_GetParam("HTTP_HOST", req->envp) ?: "";
 			wreq.range    = FCGX_GetParam("HTTP_RANGE", req->envp) ?: "";
 

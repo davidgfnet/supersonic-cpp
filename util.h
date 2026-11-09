@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 // Decodes hex -> bin
 unsigned char hexdec(char c);
@@ -25,6 +26,9 @@ std::string base64Decode(const std::string & input);
 
 // Parses variables in the body of a request, or in a GET query
 std::unordered_multimap<std::string, std::string> parse_vars(std::string body);
+
+// Returns all values of a repeated variable (ie. a=1&a=2), in request order
+std::vector<std::string> parse_var_list(const std::string &body, const std::string &key);
 
 // Formats a unix timestamp as ISO 8601 (UTC)
 std::string isotime(uint64_t t);

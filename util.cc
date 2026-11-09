@@ -124,21 +124,34 @@ std::string base64Decode(const std::string & input) {
 	return ret;
 }
 
-std::unordered_multimap<std::string, std::string> parse_vars(std::string body) {
-	std::unordered_multimap<std::string, std::string> vars;
+static std::vector<std::pair<std::string, std::string>> parse_vars_ordered(const std::string &body) {
+	std::vector<std::pair<std::string, std::string>> vars;
 	size_t p = 0;
 	while (1) {
 		size_t pe = body.find('&', p);
 		std::string curv = pe != std::string::npos ? body.substr(p, pe - p) : body.substr(p);
 		size_t peq = curv.find('=');
 		if (peq != std::string::npos)
-			vars.emplace(urldec(curv.substr(0, peq)), urldec(curv.substr(peq+1)));
+			vars.emplace_back(urldec(curv.substr(0, peq)), urldec(curv.substr(peq+1)));
 		if (pe == std::string::npos)
 			break;
 		p = pe + 1;
 	}
 
 	return vars;
+}
+
+std::unordered_multimap<std::string, std::string> parse_vars(std::string body) {
+	auto v = parse_vars_ordered(body);
+	return std::unordered_multimap<std::string, std::string>(v.begin(), v.end());
+}
+
+std::vector<std::string> parse_var_list(const std::string &body, const std::string &key) {
+	std::vector<std::string> ret;
+	for (auto it : parse_vars_ordered(body))
+		if (it.first == key)
+			ret.push_back(it.second);
+	return ret;
 }
 
 std::string isotime(uint64_t t) {
